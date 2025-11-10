@@ -1,0 +1,329 @@
+"""
+Main Execution Script for ED Utilization Prediction Pipeline
+Orchestrates data preprocessing, feature extraction, graph construction,
+training, and evaluation for TGN, TGAT, and HGT models
+"""
+
+import torch
+import numpy as np
+from pathlib import Path
+import pickle
+import pandas as pd
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
+
+# Import pipeline modules
+import config
+from data_preprocessing import preprocess_pipeline
+from feature_engineering import extract_all_features
+from graph_construction import build_all_graphs
+from models import create_model, count_parameters
+from train import train_model
+from evaluate import evaluate_model, print_metrics, MetricsTracker
+
+# Set random seeds for reproducibility
+torch.manual_seed(config.SEED)
+np.random.seed(config.SEED)
+if config.DETERMINISTIC:
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def setup_directories():
+    """Create necessary directories"""
+    for dir_path in [config.OUTPUT_DIR, config.MODEL_SAVE_DIR, config.RESULTS_DIR]:
+        Path(dir_path).mkdir(parents=True, exist_ok=True)
+
+
+def run_preprocessing():
+    """Run data preprocessing if needed"""
+    output_dir = Path(config.OUTPUT_DIR)
+    
+    if (output_dir / 'train_data.pkl').exists():
+        print("✓ Preprocessed data found, loading...")
+        with open(output_dir / 'train_data.pkl', 'rb') as f:
+            train_data, train_labels = pickle.load(f)
+        with open(output_dir / 'val_data.pkl', 'rb') as f:
+            val_data, val_labels = pickle.load(f)
+        with open(output_dir / 'test_data.pkl', 'rb') as f:
+            test_data, test_labels = pickle.load(f)
+        
+        return train_data, val_data, test_data, train_labels, val_labels, test_labels
+    else:
+        print("Running preprocessing pipeline...")
+        return preprocess_pipeline()
+
+
+def run_feature_extraction(train_data, val_data, test_data):
+    """Run feature extraction if needed"""
+    output_dir = Path(config.OUTPUT_DIR)
+    
+    if (output_dir / 'features.pkl').exists():
+        print("\n✓ Features found, loading...")
+        with open(output_dir / 'features.pkl', 'rb') as f:
+            features = pickle.load(f)
+        return features
+    else:
+        print("\nRunning feature extraction pipeline...")
+        return extract_all_features(train_data, val_data, test_data)
+
+
+def run_graph_construction():
+    """Run graph construction if needed"""
+    output_dir = Path(config.OUTPUT_DIR)
+    
+    if (output_dir / 'graphs.pkl').exists():
+        print("\n✓ Graphs found, loading...")
+        with open(output_dir / 'graphs.pkl', 'rb') as f:
+            graphs = pickle.load(f)
+        return graphs
+    else:
+        print("\nRunning graph construction pipeline...")
+        return build_all_graphs()
+
+
+def prepare_training_data(graphs, features):
+    """
+    Prepare data dictionaries for training
+    
+    Returns:
+        train_data_dict, val_data_dict, test_data_dict
+    """
+    print("\nPreparing training data...")
+    
+    # Reconstruct node features for each split
+    train_data = {
+        'graph': graphs['train_graph'],
+        'labels': graphs['train_labels'],
+        'node_id_maps': graphs['node_id_maps']['train'],
+        'reverse_node_maps': graphs['reverse_node_maps']['train'],
+        'node_features': {}  # Will be populated
+    }
+    
+    val_data = {
+        'graph': graphs['val_graph'],
+        'labels': graphs['val_labels'],
+        'node_id_maps': graphs['node_id_maps']['val'],
+        'reverse_node_maps': graphs['reverse_node_maps']['val'],
+        'node_features': {}
+    }
+    
+    test_data = {
+        'graph': graphs['test_graph'],
+        'labels': graphs['test_labels'],
+        'node_id_maps': graphs['node_id_maps']['test'],
+        'reverse_node_maps': graphs['reverse_node_maps']['test'],
+        'node_features': {}
+    }
+    
+    # Add patient features (simplified - using cached features from graphs)
+    if graphs['train_graph'] is not None:
+        train_data['node_features']['patient'] = graphs['train_graph'].nodes['patient'].data['x']
+        val_data['node_features']['patient'] = graphs['val_graph'].nodes['patient'].data['x']
+        test_data['node_features']['patient'] = graphs['test_graph'].nodes['patient'].data['x']
+    else:
+        # Fallback: create dummy features
+        n_train_patients = len(train_data['node_id_maps']['patient'])
+        n_val_patients = len(val_data['node_id_maps']['patient'])
+        n_test_patients = len(test_data['node_id_maps']['patient'])
+        
+        train_data['node_features']['patient'] = torch.randn(n_train_patients, config.HIDDEN_DIM)
+        val_data['node_features']['patient'] = torch.randn(n_val_patients, config.HIDDEN_DIM)
+        test_data['node_features']['patient'] = torch.randn(n_test_patients, config.HIDDEN_DIM)
+    
+    print(f"  Train: {len(train_data['node_id_maps']['patient'])} patients, {len(train_data['labels'])} labels")
+    print(f"  Val: {len(val_data['node_id_maps']['patient'])} patients, {len(val_data['labels'])} labels")
+    print(f"  Test: {len(test_data['node_id_maps']['patient'])} patients, {len(test_data['labels'])} labels")
+    
+    return train_data, val_data, test_data
+
+
+def train_all_models(train_data, val_data, test_data):
+    """
+    Train all specified models and compare results
+    
+    Returns:
+        results: Dictionary with results for each model
+    """
+    results = {}
+    
+    for model_name in config.MODELS_TO_TRAIN:
+        print(f"\n{'='*80}")
+        print(f"MODEL: {model_name}")
+        print(f"{'='*80}")
+        
+        try:
+            # Create model
+            if model_name == 'TGN':
+                num_patients = len(train_data['node_id_maps']['patient'])
+                model = create_model(model_name, num_nodes=num_patients)
+            elif model_name == 'TGAT':
+                model = create_model(model_name)
+            elif model_name == 'HGT':
+                model = create_model(model_name)
+            else:
+                print(f"  ✗ Unknown model: {model_name}")
+                continue
+            
+            print(f"\n  Model parameters: {count_parameters(model):,}")
+            
+            # Train model
+            trained_model, metrics_tracker = train_model(
+                model, train_data, val_data, model_name, device=config.DEVICE
+            )
+            
+            # Evaluate on test set (inductive)
+            print(f"\n  Evaluating on test set (inductive)...")
+            test_metrics = validate_test(trained_model, test_data)
+            print_metrics(test_metrics, prefix="  TEST ")
+            
+            # Store results
+            results[model_name] = {
+                'model': trained_model,
+                'metrics_tracker': metrics_tracker,
+                'test_metrics': test_metrics,
+                'num_parameters': count_parameters(trained_model)
+            }
+            
+        except Exception as e:
+            print(f"  ✗ Error training {model_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    return results
+
+
+def validate_test(model, test_data):
+    """Evaluate model on test set"""
+    device = config.DEVICE
+    model.eval()
+    
+    # Prepare test data
+    patient_nodes = torch.tensor(
+        list(test_data['node_id_maps']['patient'].values()),
+        dtype=torch.long
+    ).to(device)
+    
+    node_features = test_data['node_features']['patient'].to(device)
+    
+    # Get labels
+    labels_df = test_data['labels']
+    patient_ids = [test_data['reverse_node_maps']['patient'][i] for i in range(len(patient_nodes))]
+    
+    delta_targets = []
+    binary_targets = []
+    censored_flags = []
+    
+    for pid in patient_ids:
+        patient_labels = labels_df[labels_df['patient_id'] == pid]
+        if len(patient_labels) > 0:
+            label = patient_labels.iloc[0]
+            delta_targets.append(max(0, label['days_to_next_ed']))
+            binary_targets.append(label['has_next_ed_30d'])
+            censored_flags.append(label['days_to_next_ed'] < 0)
+        else:
+            delta_targets.append(0.0)
+            binary_targets.append(0)
+            censored_flags.append(True)
+    
+    delta_targets = torch.tensor(delta_targets, dtype=torch.float32)
+    binary_targets = torch.tensor(binary_targets, dtype=torch.float32)
+    censored_mask = torch.tensor(censored_flags, dtype=torch.bool)
+    
+    # Evaluate
+    metrics = evaluate_model(
+        model, patient_nodes, node_features,
+        delta_targets, binary_targets, censored_mask, device
+    )
+    
+    return metrics
+
+
+def create_results_table(results):
+    """
+    Create comparison table of all models
+    
+    Returns:
+        results_df: Pandas DataFrame with results
+    """
+    print(f"\n{'='*80}")
+    print("RESULTS COMPARISON")
+    print(f"{'='*80}\n")
+    
+    rows = []
+    for model_name, result in results.items():
+        test_metrics = result['test_metrics']
+        row = {
+            'Model': model_name,
+            '#Params': f"{result['num_parameters']:,}",
+            'C-index': f"{test_metrics.get('c_index', 0):.4f}",
+            'MAE (days)': f"{test_metrics.get('mae', 0):.2f}",
+            'RMSE (days)': f"{test_metrics.get('rmse', 0):.2f}",
+            'AUROC@7d': f"{test_metrics.get('auroc_7d', 0):.4f}",
+            'AUROC@30d': f"{test_metrics.get('auroc_30d', 0):.4f}",
+            'AUROC@90d': f"{test_metrics.get('auroc_90d', 0):.4f}",
+        }
+        rows.append(row)
+    
+    results_df = pd.DataFrame(rows)
+    print(results_df.to_string(index=False))
+    
+    # Save results
+    results_dir = Path(config.RESULTS_DIR)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_df.to_csv(results_dir / f'results_{timestamp}.csv', index=False)
+    print(f"\n  ✓ Results saved to {results_dir / f'results_{timestamp}.csv'}")
+    
+    return results_df
+
+
+def main():
+    """Main execution pipeline"""
+    print("\n" + "="*80)
+    print("ED UTILIZATION PREDICTION PIPELINE")
+    print("Temporal Heterogeneous Graph Neural Networks")
+    print("="*80)
+    
+    # Setup
+    setup_directories()
+    
+    print(f"\nConfiguration:")
+    print(f"  Device: {config.DEVICE}")
+    print(f"  Models: {', '.join(config.MODELS_TO_TRAIN)}")
+    print(f"  Hidden dim: {config.HIDDEN_DIM}")
+    print(f"  Num epochs: {config.NUM_EPOCHS}")
+    print(f"  Learning rate: {config.LEARNING_RATE}")
+    
+    # Step 1: Data Preprocessing
+    train_data, val_data, test_data, train_labels, val_labels, test_labels = run_preprocessing()
+    
+    # Step 2: Feature Extraction
+    features = run_feature_extraction(train_data, val_data, test_data)
+    
+    # Step 3: Graph Construction
+    graphs = run_graph_construction()
+    
+    # Step 4: Prepare Training Data
+    train_dict, val_dict, test_dict = prepare_training_data(graphs, features)
+    
+    # Step 5: Train Models
+    results = train_all_models(train_dict, val_dict, test_dict)
+    
+    # Step 6: Create Results Table
+    if results:
+        results_df = create_results_table(results)
+    else:
+        print("\n  ✗ No results to display (all models failed)")
+    
+    print(f"\n{'='*80}")
+    print("PIPELINE COMPLETE")
+    print(f"{'='*80}\n")
+    
+    return results
+
+
+if __name__ == "__main__":
+    results = main()
+
