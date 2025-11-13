@@ -31,13 +31,69 @@ def load_raw_data() -> Dict[str, pd.DataFrame]:
     
     data_path = Path(config.DATA_DIR)
     
+    # Helper function to read CSV with fallback options
+    def read_csv_robust(filepath, **kwargs):
+        """Try reading CSV with multiple fallback options"""
+        try:
+            return pd.read_csv(filepath, **kwargs)
+        except Exception as e:
+            print(f"  Warning: Error reading {filepath.name} with initial params: {e}")
+            
+            # Diagnose the file
+            try:
+                print(f"  Diagnosing file format...")
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    first_lines = [f.readline().strip() for _ in range(5)]
+                print(f"  First 5 lines of {filepath.name}:")
+                for i, line in enumerate(first_lines, 1):
+                    print(f"    Line {i}: {line[:100]}")  # Show first 100 chars
+            except Exception as diag_error:
+                print(f"  Could not diagnose file: {diag_error}")
+            
+            # Try without index_col
+            try:
+                print(f"  Attempting: without index_col...")
+                kwargs_copy = kwargs.copy()
+                kwargs_copy.pop('index_col', None)
+                return pd.read_csv(filepath, **kwargs_copy)
+            except Exception as e2:
+                print(f"  Failed: {e2}")
+                
+                # Try with different separator
+                try:
+                    print(f"  Attempting: comma separator instead of semicolon...")
+                    kwargs_copy = kwargs.copy()
+                    kwargs_copy['sep'] = ','
+                    return pd.read_csv(filepath, **kwargs_copy)
+                except Exception as e3:
+                    print(f"  Failed: {e3}")
+                    
+                    # Try with on_bad_lines='skip' (pandas 1.3+)
+                    try:
+                        print(f"  Attempting: skip bad lines...")
+                        kwargs_copy = kwargs.copy()
+                        kwargs_copy['on_bad_lines'] = 'skip'
+                        kwargs_copy['sep'] = kwargs.get('sep', ',')
+                        return pd.read_csv(filepath, **kwargs_copy)
+                    except:
+                        # Final fallback: try with error_bad_lines=False for older pandas
+                        try:
+                            print(f"  Attempting: error_bad_lines=False (older pandas)...")
+                            kwargs_copy = kwargs.copy()
+                            kwargs_copy['error_bad_lines'] = False
+                            kwargs_copy['warn_bad_lines'] = True
+                            return pd.read_csv(filepath, **kwargs_copy)
+                        except Exception as final_error:
+                            print(f"  All attempts failed. Last error: {final_error}")
+                            raise
+    
     data = {
-        'demographics': pd.read_csv(data_path / 'demographics.csv', index_col=0),
-        'diagnosis': pd.read_csv(data_path / 'diagnosis.csv', index_col=0),
-        'procedures': pd.read_csv(data_path / 'procedures.csv', index_col=0),
-        'nyu_edu': pd.read_csv(data_path / 'nyu_edu.csv', index_col=0),
-        'sdoh': pd.read_csv(data_path / 'sdoh.csv', sep=';', index_col=0),
-        'procMapping': pd.read_csv(data_path / 'procMapping.csv', sep=';', index_col=0),
+        'demographics': read_csv_robust(data_path / 'demographics.csv', index_col=0),
+        'diagnosis': read_csv_robust(data_path / 'diagnosis.csv', index_col=0),
+        'procedures': read_csv_robust(data_path / 'procedures.csv', index_col=0),
+        'nyu_edu': read_csv_robust(data_path / 'nyu_edu.csv', index_col=0),
+        'sdoh': read_csv_robust(data_path / 'sdoh.csv', sep=';', index_col=0),
+        'procMapping': read_csv_robust(data_path / 'procMapping.csv', sep=';', index_col=0),
     }
     
     print(f"  demographics: {len(data['demographics'])} rows")
@@ -347,4 +403,5 @@ def preprocess_pipeline():
 
 if __name__ == "__main__":
     preprocess_pipeline()
+
 
