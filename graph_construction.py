@@ -1,6 +1,6 @@
 """
 Heterogeneous Temporal Graph Construction
-Builds DGL heterogeneous graphs with temporal edges
+Builds PyTorch Geometric heterogeneous graphs with temporal edges
 """
 
 import torch
@@ -13,11 +13,11 @@ from collections import defaultdict
 import config
 
 try:
-    import dgl
-    HAS_DGL = True
+    from torch_geometric.data import HeteroData
+    HAS_PYG = True
 except ImportError:
-    print("Warning: DGL not installed. Please install: pip install dgl")
-    HAS_DGL = False
+    print("Warning: PyTorch Geometric not installed. Please install: pip install torch-geometric")
+    HAS_PYG = False
 
 
 class HeteroGraphBuilder:
@@ -369,24 +369,31 @@ class HeteroGraphBuilder:
             print(f"    {ntype}: {feat.shape}")
         
         # =====================================================================
-        # 4. Build DGL graph
+        # 4. Build PyTorch Geometric HeteroData graph
         # =====================================================================
         
-        if not HAS_DGL:
-            print("  ✗ DGL not available, skipping graph construction")
+        if not HAS_PYG:
+            print("  ✗ PyTorch Geometric not available, skipping graph construction")
             return None, node_features, edge_timestamps
         
-        graph = dgl.heterograph(edge_dict, num_nodes_dict=node_counts)
+        graph = HeteroData()
         
         # Add node features
         for ntype, feat in node_features.items():
-            graph.nodes[ntype].data['x'] = feat
+            graph[ntype].x = feat
+            graph[ntype].num_nodes = node_counts[ntype]
         
-        # Add edge timestamps
-        for etype, ts in edge_timestamps.items():
-            graph.edges[etype].data['timestamp'] = ts
+        # Add edges and edge attributes
+        for etype, (src, dst) in edge_dict.items():
+            # PyG expects edge_index as (2, num_edges)
+            edge_index = torch.stack([src, dst], dim=0)
+            graph[etype].edge_index = edge_index
+            
+            # Add timestamps as edge attributes if available
+            if etype in edge_timestamps:
+                graph[etype].edge_attr = edge_timestamps[etype].unsqueeze(-1)
         
-        print(f"  ✓ Graph created: {graph}")
+        print(f"  ✓ Graph created with {len(graph.node_types)} node types and {len(graph.edge_types)} edge types")
         
         return graph, node_features, edge_timestamps
 
@@ -448,4 +455,5 @@ def build_all_graphs():
 
 if __name__ == "__main__":
     graphs = build_all_graphs()
+
 

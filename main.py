@@ -119,9 +119,10 @@ def prepare_training_data(graphs, features):
     
     # Add patient features (simplified - using cached features from graphs)
     if graphs['train_graph'] is not None:
-        train_data['node_features']['patient'] = graphs['train_graph'].nodes['patient'].data['x']
-        val_data['node_features']['patient'] = graphs['val_graph'].nodes['patient'].data['x']
-        test_data['node_features']['patient'] = graphs['test_graph'].nodes['patient'].data['x']
+        # PyG syntax: graph[node_type].x
+        train_data['node_features']['patient'] = graphs['train_graph']['patient'].x
+        val_data['node_features']['patient'] = graphs['val_graph']['patient'].x
+        test_data['node_features']['patient'] = graphs['test_graph']['patient'].x
     else:
         # Fallback: create dummy features
         n_train_patients = len(train_data['node_id_maps']['patient'])
@@ -326,4 +327,5 @@ def main():
 
 if __name__ == "__main__":
     results = main()
+
 

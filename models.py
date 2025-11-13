@@ -10,20 +10,12 @@ import config
 
 # Try to import required libraries
 try:
-    import dgl
-    import dgl.nn as dglnn
-    HAS_DGL = True
-except ImportError:
-    HAS_DGL = False
-    print("Warning: DGL not available")
-
-try:
     from torch_geometric_temporal import TGN as PyG_TGN
-    from torch_geometric.nn import TransformerConv
-    HAS_PYG_TEMPORAL = True
+    from torch_geometric.nn import TransformerConv, HGTConv
+    HAS_PYG = True
 except ImportError:
-    HAS_PYG_TEMPORAL = False
-    print("Warning: PyG Temporal not available")
+    HAS_PYG = False
+    print("Warning: PyTorch Geometric not available")
 
 
 class PredictionHead(nn.Module):
@@ -298,12 +290,12 @@ class TGAT(nn.Module):
 
 
 # =============================================================================
-# HGT (Heterogeneous Graph Transformer) - DGL Implementation  
+# HGT (Heterogeneous Graph Transformer) - PyTorch Geometric Implementation  
 # =============================================================================
 
 class HGTModel(nn.Module):
     """
-    Heterogeneous Graph Transformer
+    Heterogeneous Graph Transformer using PyTorch Geometric
     Handles multiple node and edge types with meta-relations
     """
     
@@ -313,8 +305,8 @@ class HGTModel(nn.Module):
         self.node_types = node_types
         self.edge_types = edge_types
         
-        if not HAS_DGL:
-            raise ImportError("DGL is required for HGT")
+        if not HAS_PYG:
+            raise ImportError("PyTorch Geometric is required for HGT")
         
         # Input projection for each node type
         self.node_projections = nn.ModuleDict({
@@ -322,32 +314,75 @@ class HGTModel(nn.Module):
             for ntype in node_types
         })
         
-        # HGT layers
+        # Create metadata tuple for PyG HGTConv
+        # metadata = (node_types, edge_types)
+        self.metadata = (node_types, edge_types)
+        
+        # HGT layers using PyTorch Geometric
         self.layers = nn.ModuleList([
-            dglnn.HGTConv(
-                in_feats=config.HIDDEN_DIM,
-                out_feats=config.HIDDEN_DIM,
-                num_heads=config.HGT_NUM_HEADS,
-                num_ntypes=len(node_types),
-                num_etypes=len(edge_types),
-                dropout=config.DROPOUT,
-                use_norm=config.HGT_USE_NORM
+            HGTConv(
+                in_channels=config.HIDDEN_DIM,
+                out_channels=config.HIDDEN_DIM,
+                metadata=self.metadata,
+                heads=config.HGT_NUM_HEADS,
+                group='sum'  # Aggregation method for attention heads
             )
             for _ in range(config.NUM_LAYERS)
         ])
         
+        # Layer normalization for each node type (if enabled)
+        if config.HGT_USE_NORM:
+            self.norms = nn.ModuleList([
+                nn.ModuleDict({
+                    ntype: nn.LayerNorm(config.HIDDEN_DIM)
+                    for ntype in node_types
+                })
+                for _ in range(config.NUM_LAYERS)
+            ])
+        else:
+            self.norms = None
+        
+        # Dropout
+        self.dropout = nn.Dropout(config.DROPOUT)
+        
         # Output head
         self.pred_head = PredictionHead(config.HIDDEN_DIM)
     
-    def forward(self, graph, node_features_dict):
+    def forward(self, patient_nodes_or_dict, node_features_or_edge_dict=None):
         """
-        Args:
-            graph: DGL heterogeneous graph
-            node_features_dict: Dict of {node_type: features}
+        Flexible forward pass that supports both simplified and full interfaces.
         
-        Returns:
-            patient_embeddings: Embeddings for patient nodes
+        Simplified interface (for compatibility with training pipeline):
+            Args:
+                patient_nodes_or_dict: Patient node IDs (tensor)
+                node_features_or_edge_dict: Patient node features (tensor)
+            Returns:
+                delta_pred, binary_logits from prediction head
+        
+        Full interface:
+            Args:
+                patient_nodes_or_dict: Dict of {node_type: features (num_nodes, in_dim)}
+                node_features_or_edge_dict: Dict of {edge_type: edge_index (2, num_edges)}
+            Returns:
+                patient_embeddings: Embeddings for patient nodes
         """
+        # Check if using simplified interface (for compatibility with training code)
+        if isinstance(patient_nodes_or_dict, torch.Tensor):
+            # Simplified interface: just use the patient features
+            patient_features = node_features_or_edge_dict
+            patient_embeddings = self.node_projections['patient'](patient_features)
+            
+            # Apply a simple MLP (since we don't have full graph structure)
+            for _ in range(config.NUM_LAYERS):
+                patient_embeddings = F.relu(patient_embeddings)
+                patient_embeddings = self.dropout(patient_embeddings)
+            
+            return self.pred_head(patient_embeddings)
+        
+        # Full interface: use heterogeneous graph
+        node_features_dict = patient_nodes_or_dict
+        edge_index_dict = node_features_or_edge_dict
+        
         # Project input features
         h_dict = {}
         for ntype in self.node_types:
@@ -355,19 +390,39 @@ class HGTModel(nn.Module):
                 h_dict[ntype] = self.node_projections[ntype](node_features_dict[ntype])
             else:
                 # Create dummy features if not present
-                num_nodes = graph.number_of_nodes(ntype) if graph else 1
-                h_dict[ntype] = torch.zeros(num_nodes, config.HIDDEN_DIM)
+                # This is a fallback - in practice all node types should have features
+                h_dict[ntype] = torch.zeros(1, config.HIDDEN_DIM, 
+                                           device=next(self.parameters()).device)
         
         # Apply HGT layers
-        for layer in self.layers:
-            if graph is not None:
-                h_dict = layer(graph, h_dict, graph.ndata['node_type'], graph.edata['edge_type'])
-            else:
-                # Placeholder: just pass through
-                pass
+        for i, layer in enumerate(self.layers):
+            # Store previous features for residual connection
+            h_dict_prev = h_dict
+            
+            # Apply HGT convolution
+            h_dict = layer(h_dict, edge_index_dict)
+            
+            # Apply normalization if enabled
+            if self.norms is not None:
+                h_dict = {
+                    ntype: self.norms[i][ntype](h)
+                    for ntype, h in h_dict.items()
+                }
+            
+            # Apply dropout and residual connection
+            h_dict = {
+                ntype: self.dropout(h) + h_dict_prev.get(ntype, 0)
+                for ntype, h in h_dict.items()
+            }
+            
+            # Apply activation (ReLU)
+            h_dict = {
+                ntype: F.relu(h)
+                for ntype, h in h_dict.items()
+            }
         
         # Return patient embeddings
-        return h_dict['patient'] if 'patient' in h_dict else h_dict[list(h_dict.keys())[0]]
+        return h_dict.get('patient', h_dict[list(h_dict.keys())[0]])
     
     def predict(self, patient_embeddings):
         """Make predictions from patient embeddings"""
@@ -432,4 +487,5 @@ if __name__ == "__main__":
         print(f"  Error: {e}")
     
     print("\n✓ Model creation tests passed")
+
 

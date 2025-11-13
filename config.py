@@ -107,7 +107,7 @@ MIN_DELTA = 1e-4          # Minimum improvement to count as progress
 # ============================================================================
 # SAMPLING (for mini-batch training)
 # ============================================================================
-# DGL neighbor sampling
+# PyG neighbor sampling
 FANOUT = [15, 10, 10]     # Neighbor samples per layer
 NUM_WORKERS = 4
 
