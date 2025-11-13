@@ -103,6 +103,96 @@ def load_raw_data() -> Dict[str, pd.DataFrame]:
     print(f"  sdoh: {len(data['sdoh'])} rows")
     print(f"  procMapping: {len(data['procMapping'])} rows")
     
+    # Detect and standardize column names
+    data = standardize_column_names(data)
+    
+    return data
+
+
+def find_column(df: pd.DataFrame, possible_names: list, df_name: str = "dataframe") -> str:
+    """
+    Find a column in dataframe by trying multiple possible names
+    Returns the actual column name if found, None otherwise
+    """
+    cols = df.columns.tolist()
+    
+    # Try exact match first
+    for name in possible_names:
+        if name in cols:
+            return name
+    
+    # Try case-insensitive match
+    cols_lower = {col.lower(): col for col in cols}
+    for name in possible_names:
+        if name.lower() in cols_lower:
+            return cols_lower[name.lower()]
+    
+    # Try partial match
+    for name in possible_names:
+        name_lower = name.lower()
+        for col in cols:
+            if name_lower in col.lower():
+                return col
+    
+    return None
+
+
+def standardize_column_names(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+    """
+    Detect actual column names and create standardized aliases
+    This handles cases where the actual data has different column names
+    """
+    print("\nStandardizing column names...")
+    
+    # SDOH: Look for EMPI column
+    empi_col = find_column(data['sdoh'], ['lumeris_empi', 'empi', 'EMPI', 'patient_id', 'patient_empi'], 'SDOH')
+    
+    if empi_col:
+        if empi_col != 'lumeris_empi':
+            print(f"  SDOH: Using '{empi_col}' as 'lumeris_empi'")
+            data['sdoh']['lumeris_empi'] = data['sdoh'][empi_col]
+        else:
+            print(f"  SDOH: Found 'lumeris_empi' column ✓")
+    else:
+        sdoh_cols = data['sdoh'].columns.tolist()
+        print(f"  Warning: No EMPI column found in SDOH.")
+        print(f"    Available columns: {sdoh_cols[:10]}")
+        # Try to use the first column that looks like an ID
+        id_col = None
+        for col in sdoh_cols:
+            if any(x in str(col).lower() for x in ['id', 'key', 'sk']):
+                id_col = col
+                break
+        
+        if id_col:
+            print(f"    Using '{id_col}' as fallback for 'lumeris_empi'")
+            data['sdoh']['lumeris_empi'] = data['sdoh'][id_col]
+        else:
+            print(f"    Creating sequential IDs for 'lumeris_empi'")
+            data['sdoh']['lumeris_empi'] = range(len(data['sdoh']))
+    
+    # Demographics: Ensure 'empi' column exists
+    empi_col_demo = find_column(data['demographics'], ['empi', 'EMPI', 'lumeris_empi', 'patient_empi'], 'demographics')
+    
+    if empi_col_demo:
+        if empi_col_demo != 'empi':
+            print(f"  Demographics: Using '{empi_col_demo}' as 'empi'")
+            data['demographics']['empi'] = data['demographics'][empi_col_demo]
+        else:
+            print(f"  Demographics: Found 'empi' column ✓")
+    else:
+        demo_cols = data['demographics'].columns.tolist()
+        print(f"  Warning: No EMPI column found in demographics.")
+        print(f"    Available columns: {demo_cols[:10]}")
+        # Try to use sys_mbr_sk as a fallback
+        if 'sys_mbr_sk' in demo_cols:
+            print(f"    Using 'sys_mbr_sk' as 'empi' fallback")
+            data['demographics']['empi'] = data['demographics']['sys_mbr_sk']
+        else:
+            print(f"    Creating index-based 'empi' column")
+            data['demographics']['empi'] = data['demographics'].index
+    
+    print("  ✓ Column names standardized")
     return data
 
 
@@ -111,25 +201,58 @@ def create_timestamps(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     Parse and create timestamps for all temporal events
     Adds 'timestamp' column to relevant dataframes
     """
-    print("Creating timestamps...")
+    print("\nCreating timestamps...")
     
     # Diagnosis timestamps
-    data['diagnosis']['timestamp'] = data['diagnosis']['clm_claim_beg_svc_dt'].apply(parse_date)
-    data['diagnosis'] = data['diagnosis'][data['diagnosis']['timestamp'].notna()].copy()
-    print(f"  diagnosis: {len(data['diagnosis'])} with valid timestamps")
+    diag_date_col = find_column(data['diagnosis'], 
+                                 ['clm_claim_beg_svc_dt', 'claim_date', 'service_date', 'date', 'timestamp'], 
+                                 'diagnosis')
+    if diag_date_col:
+        print(f"  Using '{diag_date_col}' for diagnosis timestamps")
+        data['diagnosis']['timestamp'] = data['diagnosis'][diag_date_col].apply(parse_date)
+        data['diagnosis'] = data['diagnosis'][data['diagnosis']['timestamp'].notna()].copy()
+        print(f"  diagnosis: {len(data['diagnosis'])} with valid timestamps")
+    else:
+        print(f"  Warning: No date column found in diagnosis. Creating dummy timestamps.")
+        data['diagnosis']['timestamp'] = pd.Timestamp.now()
     
     # Procedure timestamps
-    data['procedures']['timestamp'] = data['procedures']['svc_from_dt'].apply(parse_date)
-    data['procedures'] = data['procedures'][data['procedures']['timestamp'].notna()].copy()
-    print(f"  procedures: {len(data['procedures'])} with valid timestamps")
+    proc_date_col = find_column(data['procedures'], 
+                                ['svc_from_dt', 'service_date', 'procedure_date', 'date', 'timestamp'], 
+                                'procedures')
+    if proc_date_col:
+        print(f"  Using '{proc_date_col}' for procedure timestamps")
+        data['procedures']['timestamp'] = data['procedures'][proc_date_col].apply(parse_date)
+        data['procedures'] = data['procedures'][data['procedures']['timestamp'].notna()].copy()
+        print(f"  procedures: {len(data['procedures'])} with valid timestamps")
+    else:
+        print(f"  Warning: No date column found in procedures. Creating dummy timestamps.")
+        data['procedures']['timestamp'] = pd.Timestamp.now()
     
     # ED visit timestamps (nyu_edu)
-    data['nyu_edu']['timestamp'] = data['nyu_edu']['hosp_adm_dt'].apply(parse_date)
-    data['nyu_edu'] = data['nyu_edu'][data['nyu_edu']['timestamp'].notna()].copy()
-    print(f"  nyu_edu: {len(data['nyu_edu'])} with valid timestamps")
+    ed_date_col = find_column(data['nyu_edu'], 
+                              ['hosp_adm_dt', 'admission_date', 'visit_date', 'date', 'timestamp'], 
+                              'nyu_edu')
+    if ed_date_col:
+        print(f"  Using '{ed_date_col}' for ED visit timestamps")
+        data['nyu_edu']['timestamp'] = data['nyu_edu'][ed_date_col].apply(parse_date)
+        data['nyu_edu'] = data['nyu_edu'][data['nyu_edu']['timestamp'].notna()].copy()
+        print(f"  nyu_edu: {len(data['nyu_edu'])} with valid timestamps")
+    else:
+        print(f"  Warning: No date column found in nyu_edu. Creating dummy timestamps.")
+        data['nyu_edu']['timestamp'] = pd.Timestamp.now()
     
     # Demographics - use DOB for age calculation
-    data['demographics']['dob'] = data['demographics']['mbr_dob'].apply(parse_date)
+    dob_col = find_column(data['demographics'], 
+                         ['mbr_dob', 'dob', 'date_of_birth', 'birth_date'], 
+                         'demographics')
+    if dob_col:
+        print(f"  Using '{dob_col}' for date of birth")
+        data['demographics']['dob'] = data['demographics'][dob_col].apply(parse_date)
+    else:
+        print(f"  Warning: No DOB column found in demographics. Ages will be approximate.")
+        # Create a default DOB (e.g., 50 years ago)
+        data['demographics']['dob'] = pd.Timestamp.now() - pd.DateOffset(years=50)
     
     return data
 
