@@ -25,8 +25,9 @@ class HeteroGraphBuilder:
     
     def __init__(self, features: Dict):
         self.features = features
-        self.node_id_maps = defaultdict(dict)  # Map original IDs to graph node IDs
-        self.reverse_node_maps = defaultdict(dict)  # Reverse mapping
+        # Use nested defaultdicts for proper initialization
+        self.node_id_maps = defaultdict(lambda: defaultdict(dict))  # Map original IDs to graph node IDs
+        self.reverse_node_maps = defaultdict(lambda: defaultdict(dict))  # Reverse mapping
         
     def build_graph(self, split_data: Dict, labels_df: pd.DataFrame, split_name: str):
         """

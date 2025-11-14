@@ -300,6 +300,17 @@ def time_based_split(data: Dict[str, pd.DataFrame]) -> Tuple[Dict, Dict, Dict]:
     
     events_df = pd.DataFrame(all_events)
     
+    # Diagnostic: Show date ranges for each event type
+    print("\n  Date ranges by event type:")
+    for source in ['diagnosis', 'procedure', 'ed_visit']:
+        source_events = events_df[events_df['source'] == source]
+        if len(source_events) > 0:
+            min_date = source_events['timestamp'].min()
+            max_date = source_events['timestamp'].max()
+            print(f"    {source}: {min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')} ({len(source_events)} events)")
+        else:
+            print(f"    {source}: No events found")
+    
     # Assign each patient to ONE split based on their FIRST event
     patient_first_event = events_df.groupby('patient_id')['timestamp'].min()
     
@@ -401,6 +412,22 @@ def time_based_split(data: Dict[str, pd.DataFrame]) -> Tuple[Dict, Dict, Dict]:
     print(f"    Train: {len(train_data['diagnosis'])} dx, {len(train_data['procedures'])} proc, {len(train_data['nyu_edu'])} ED")
     print(f"    Val: {len(val_data['diagnosis'])} dx, {len(val_data['procedures'])} proc, {len(val_data['nyu_edu'])} ED")
     print(f"    Test: {len(test_data['diagnosis'])} dx, {len(test_data['procedures'])} proc, {len(test_data['nyu_edu'])} ED")
+    
+    # Warn about insufficient ED visits
+    if len(train_data['nyu_edu']) == 0:
+        print(f"\n  ⚠ WARNING: No ED visits in training data!")
+        print(f"    This is likely because all ED visits occur after {config.T_CUT_TRAIN}")
+        print(f"    The model may not learn effectively without training ED visits.")
+        print(f"    Consider adjusting T_CUT_TRAIN in config.py to include more ED visits.")
+    
+    if len(val_data['nyu_edu']) == 0:
+        print(f"\n  ⚠ WARNING: No ED visits in validation data!")
+        print(f"    This will make it difficult to tune hyperparameters.")
+        print(f"    Consider adjusting T_CUT_VAL in config.py.")
+    
+    if len(train_data['nyu_edu']) < 10:
+        print(f"\n  ⚠ WARNING: Very few ED visits in training data ({len(train_data['nyu_edu'])})!")
+        print(f"    Model training may be unstable with so few positive examples.")
     
     return train_data, val_data, test_data
 
