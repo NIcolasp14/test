@@ -47,14 +47,12 @@ class PredictionHead(nn.Module):
             node_embeddings: (batch_size, hidden_dim) - patient embeddings
         
         Returns:
-            delta_pred: (batch_size, 1) - predicted days to next ED
+            delta_pred: (batch_size, 1) - predicted time normalized to [0, 1]
             binary_logits: (batch_size, 1) - logits for within-30-day classification
         """
-        delta_pred = self.delta_predictor(node_embeddings)
+        # Predict normalized time-to-event in [0, 1] range using sigmoid
+        delta_pred = torch.sigmoid(self.delta_predictor(node_embeddings))
         binary_logits = self.binary_predictor(node_embeddings)
-        
-        # Ensure delta is non-negative
-        delta_pred = F.softplus(delta_pred)
         
         return delta_pred, binary_logits
 

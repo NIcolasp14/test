@@ -561,6 +561,7 @@ def create_labels(split_data: Dict[str, pd.DataFrame], split_name: str) -> pd.Da
     - current_timestamp (observation time)
     - next_ed_timestamp (next ED visit time, or None)
     - days_to_next_ed (time delta in days, or -1 for censored)
+    - days_to_next_ed_normalized (normalized to [0, 1], or -1 for censored)
     - has_next_ed_30d (binary: ED within 30 days)
     """
     print(f"\nCreating labels for {split_name} split...")
@@ -623,10 +624,25 @@ def create_labels(split_data: Dict[str, pd.DataFrame], split_name: str) -> pd.Da
     
     labels_df = pd.DataFrame(labels)
     
+    # CRITICAL: Normalize days_to_next_ed for stable training
+    # Cap at MAX_DAYS and normalize to [0, 1]
+    MAX_DAYS = float(config.MAX_DAYS_NORMALIZATION)
+    uncensored_mask = labels_df['days_to_next_ed'] > 0
+    labels_df['days_to_next_ed_normalized'] = -1.0  # Default for censored
+    if uncensored_mask.sum() > 0:
+        # Clip to MAX_DAYS and normalize
+        clipped_days = np.clip(labels_df.loc[uncensored_mask, 'days_to_next_ed'], 0, MAX_DAYS)
+        labels_df.loc[uncensored_mask, 'days_to_next_ed_normalized'] = clipped_days / MAX_DAYS
+    
     print(f"  Created {len(labels_df)} prediction samples")
     print(f"  Censored: {(labels_df['days_to_next_ed'] == -1).sum()}")
     print(f"  Uncensored: {(labels_df['days_to_next_ed'] > 0).sum()}")
     print(f"  ED within 30d: {labels_df['has_next_ed_30d'].sum()}")
+    
+    if uncensored_mask.sum() > 0:
+        print(f"  Days to next ED (uncensored): mean={labels_df.loc[uncensored_mask, 'days_to_next_ed'].mean():.1f}, "
+              f"median={labels_df.loc[uncensored_mask, 'days_to_next_ed'].median():.1f}, "
+              f"max={labels_df.loc[uncensored_mask, 'days_to_next_ed'].max():.0f}")
     
     return labels_df
 

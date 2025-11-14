@@ -74,16 +74,17 @@ def create_scheduler(optimizer, scheduler_type=config.SCHEDULER_TYPE):
         return None
 
 
-def compute_loss(delta_pred, binary_logits, delta_true, binary_true, censored_mask=None):
+def compute_loss(delta_pred, binary_logits, delta_true, binary_true, censored_mask=None, pos_weight=None):
     """
-    Compute multi-task loss: MAE + BCE
+    Compute multi-task loss: MAE + Weighted BCE
     
     Args:
-        delta_pred: Predicted time-to-event (batch_size, 1)
+        delta_pred: Predicted time-to-event (batch_size, 1) - normalized [0, 1]
         binary_logits: Binary classification logits (batch_size, 1)
-        delta_true: True time-to-event (batch_size,)
+        delta_true: True time-to-event (batch_size,) - normalized [0, 1] or -1 for censored
         binary_true: True binary labels (batch_size,)
         censored_mask: Boolean mask for censored samples
+        pos_weight: Weight for positive class in BCE (for class imbalance)
     
     Returns:
         total_loss, mae_loss, bce_loss
@@ -92,22 +93,30 @@ def compute_loss(delta_pred, binary_logits, delta_true, binary_true, censored_ma
     binary_logits = binary_logits.squeeze()
     
     # MAE loss (only on observed samples)
+    # Note: delta_true is now normalized to [0, 1]
     if censored_mask is not None:
-        observed_mask = ~censored_mask & (delta_true > 0)
+        observed_mask = ~censored_mask & (delta_true >= 0)
     else:
-        observed_mask = delta_true > 0
+        observed_mask = delta_true >= 0
     
     if observed_mask.sum() > 0:
         mae_loss = F.l1_loss(delta_pred[observed_mask], delta_true[observed_mask])
     else:
         mae_loss = torch.tensor(0.0, device=delta_pred.device)
     
-    # BCE loss for binary classification
+    # Weighted BCE loss for binary classification (handle class imbalance)
     if config.USE_MULTI_TASK:
-        bce_loss = F.binary_cross_entropy_with_logits(
-            binary_logits,
-            binary_true.float()
-        )
+        if pos_weight is not None:
+            bce_loss = F.binary_cross_entropy_with_logits(
+                binary_logits,
+                binary_true.float(),
+                pos_weight=pos_weight
+            )
+        else:
+            bce_loss = F.binary_cross_entropy_with_logits(
+                binary_logits,
+                binary_true.float()
+            )
     else:
         bce_loss = torch.tensor(0.0, device=delta_pred.device)
     
@@ -153,6 +162,7 @@ def train_epoch(model, train_data, optimizer, device, epoch):
     
     # Match labels to patient nodes
     delta_targets = []
+    delta_targets_normalized = []
     binary_targets = []
     censored_flags = []
     
@@ -162,16 +172,28 @@ def train_epoch(model, train_data, optimizer, device, epoch):
             # Use first label for simplicity
             label = patient_labels.iloc[0]
             delta_targets.append(max(0, label['days_to_next_ed']))
+            # Use normalized target for training (better scale)
+            delta_targets_normalized.append(label.get('days_to_next_ed_normalized', -1.0))
             binary_targets.append(label['has_next_ed_30d'])
             censored_flags.append(label['days_to_next_ed'] < 0)
         else:
             delta_targets.append(0.0)
+            delta_targets_normalized.append(-1.0)
             binary_targets.append(0)
             censored_flags.append(True)
     
     delta_targets = torch.tensor(delta_targets, dtype=torch.float32).to(device)
+    delta_targets_norm = torch.tensor(delta_targets_normalized, dtype=torch.float32).to(device)
     binary_targets = torch.tensor(binary_targets, dtype=torch.float32).to(device)
     censored_mask = torch.tensor(censored_flags, dtype=torch.bool).to(device)
+    
+    # Compute class weight for severe imbalance (5.4% positive class)
+    num_positive = binary_targets.sum().item()
+    num_negative = len(binary_targets) - num_positive
+    if num_positive > 0:
+        pos_weight = torch.tensor([num_negative / num_positive], device=device)
+    else:
+        pos_weight = None
     
     # Forward pass
     optimizer.zero_grad()
@@ -184,9 +206,9 @@ def train_epoch(model, train_data, optimizer, device, epoch):
         # Direct forward
         delta_pred, binary_logits = model(patient_nodes, node_features)
     
-    # Compute loss
+    # Compute loss (use normalized targets for MAE)
     loss, mae_loss, bce_loss = compute_loss(
-        delta_pred, binary_logits, delta_targets, binary_targets, censored_mask
+        delta_pred, binary_logits, delta_targets_norm, binary_targets, censored_mask, pos_weight
     )
     
     # Backward pass
@@ -208,7 +230,22 @@ def train_epoch(model, train_data, optimizer, device, epoch):
     avg_bce = total_bce / n_batches if n_batches > 0 else 0
     
     if config.VERBOSE and epoch % config.LOG_INTERVAL == 0:
+        # DIAGNOSTIC: Show predictions vs true labels to check if model is learning correctly
+        with torch.no_grad():
+            if hasattr(model, 'get_embeddings') and hasattr(model, 'pred_head'):
+                embeddings = model.get_embeddings(patient_nodes, node_features)
+                delta_pred_diag, binary_logits_diag = model.pred_head(embeddings)
+            else:
+                delta_pred_diag, binary_logits_diag = model(patient_nodes, node_features)
+            
+            binary_probs_diag = torch.sigmoid(binary_logits_diag).squeeze()
+            pred_positive_rate = (binary_probs_diag > 0.5).float().mean().item()
+            true_positive_rate = binary_targets.mean().item()
+            avg_pred_prob = binary_probs_diag.mean().item()
+            
         print(f"  Train Loss: {avg_loss:.4f} (MAE: {avg_mae:.4f}, BCE: {avg_bce:.4f})")
+        print(f"    📊 Predictions: {pred_positive_rate*100:.1f}% pred positive (true: {true_positive_rate*100:.1f}%), "
+              f"avg prob: {avg_pred_prob:.3f}, pos_weight: {pos_weight[0].item() if pos_weight is not None else 1.0:.1f}x")
     
     return avg_loss
 
@@ -247,6 +284,7 @@ def validate(model, val_data, device):
         patient_labels = labels_df[labels_df['patient_id'] == pid]
         if len(patient_labels) > 0:
             label = patient_labels.iloc[0]
+            # Use original days for evaluation metrics (not normalized)
             delta_targets.append(max(0, label['days_to_next_ed']))
             binary_targets.append(label['has_next_ed_30d'])
             censored_flags.append(label['days_to_next_ed'] < 0)

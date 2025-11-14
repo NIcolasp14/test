@@ -76,6 +76,7 @@ HGT_USE_NORM = True
 # Prediction head
 USE_MULTI_TASK = True     # Both time-to-event and binary classification
 BINARY_THRESHOLD_DAYS = 30  # Predict if ED visit within N days
+MAX_DAYS_NORMALIZATION = 365  # Cap and normalize time-to-event predictions to this range
 
 # ============================================================================
 # TRAINING
@@ -86,9 +87,9 @@ LEARNING_RATE = 3e-4  # Decreased from 1e-3 for stability
 WEIGHT_DECAY = 5e-3  # Increased from 1e-4 for regularization
 GRAD_CLIP = 1.0
 
-# Loss weights (adjusted for class imbalance)
-LAMBDA_BCE = 2.0          # Weight for binary classification loss (increased - more important with imbalance)
-LAMBDA_MAE = 0.5          # Weight for MAE loss (decreased - too noisy with censored data)
+# Loss weights (adjusted for class imbalance and poor regression performance)
+LAMBDA_BCE = 5.0          # Weight for binary classification loss (INCREASED - focus on classification with severe imbalance)
+LAMBDA_MAE = 0.1          # Weight for MAE loss (DECREASED - regression not working well with 82% censored data)
 
 # Optimizer
 OPTIMIZER = "adamw"       # Options: "adam", "adamw", "sgd"
