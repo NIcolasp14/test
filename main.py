@@ -40,7 +40,10 @@ def run_preprocessing():
     """Run data preprocessing if needed"""
     output_dir = Path(config.OUTPUT_DIR)
     
-    if (output_dir / 'train_data.pkl').exists():
+    # Check for force reprocess flag
+    force_reprocess = getattr(config, 'FORCE_REPROCESS', False)
+    
+    if (output_dir / 'train_data.pkl').exists() and not force_reprocess:
         print("✓ Preprocessed data found, loading...")
         with open(output_dir / 'train_data.pkl', 'rb') as f:
             train_data, train_labels = pickle.load(f)
@@ -49,9 +52,38 @@ def run_preprocessing():
         with open(output_dir / 'test_data.pkl', 'rb') as f:
             test_data, test_labels = pickle.load(f)
         
+        # CRITICAL DIAGNOSTICS - Show what was loaded
+        print("\n  📊 LOADED DATA SUMMARY:")
+        print(f"    Train: {len(train_data['nyu_edu'])} ED visits, {len(train_labels)} patients")
+        print(f"    Val:   {len(val_data['nyu_edu'])} ED visits, {len(val_labels)} patients")
+        print(f"    Test:  {len(test_data['nyu_edu'])} ED visits, {len(test_labels)} patients")
+        
+        # Check for data quality issues
+        train_uncensored = (train_labels['days_to_next_ed'] >= 0).sum()
+        val_uncensored = (val_labels['days_to_next_ed'] >= 0).sum()
+        
+        print(f"\n    Label distribution:")
+        print(f"    Train: {train_uncensored}/{len(train_labels)} uncensored samples")
+        print(f"    Val:   {val_uncensored}/{len(val_labels)} uncensored samples")
+        
+        if train_uncensored == 0:
+            print("\n    ⚠️  CRITICAL WARNING: NO UNCENSORED TRAINING SAMPLES!")
+            print("    ⚠️  Model cannot learn without ED visit outcomes.")
+            print("    ⚠️  This usually means:")
+            print("        - Column names in data don't match expectations")
+            print("        - Time cutoffs exclude all ED visits")
+            print("        - Data was cached before fixes were applied")
+            print("\n    💡 SOLUTION: Delete the outputs/ folder and rerun:")
+            print("       rm -rf outputs/  # or rmdir /s outputs on Windows")
+            print("       python main.py")
+            print("\n    Or set FORCE_REPROCESS = True in config.py")
+        
         return train_data, val_data, test_data, train_labels, val_labels, test_labels
     else:
-        print("Running preprocessing pipeline...")
+        if force_reprocess:
+            print("🔄 Force reprocessing data (FORCE_REPROCESS=True)...")
+        else:
+            print("Running preprocessing pipeline...")
         return preprocess_pipeline()
 
 

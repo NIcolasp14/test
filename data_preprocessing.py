@@ -34,8 +34,22 @@ def load_raw_data() -> Dict[str, pd.DataFrame]:
     # Helper function to read CSV with fallback options
     def read_csv_robust(filepath, **kwargs):
         """Try reading CSV with multiple fallback options"""
+        def validate_dataframe(df, filename):
+            """Check if dataframe was read correctly"""
+            if len(df.columns) == 0:
+                print(f"  ⚠️  Warning: {filename} has no columns after parsing!")
+                return False
+            if len(df) == 0:
+                print(f"  ⚠️  Warning: {filename} has no rows after parsing!")
+                return False
+            return True
+        
         try:
-            return pd.read_csv(filepath, **kwargs)
+            df = pd.read_csv(filepath, **kwargs)
+            if validate_dataframe(df, filepath.name):
+                return df
+            else:
+                raise ValueError(f"DataFrame validation failed for {filepath.name}")
         except Exception as e:
             print(f"  Warning: Error reading {filepath.name} with initial params: {e}")
             
@@ -55,7 +69,11 @@ def load_raw_data() -> Dict[str, pd.DataFrame]:
                 print(f"  Attempting: without index_col...")
                 kwargs_copy = kwargs.copy()
                 kwargs_copy.pop('index_col', None)
-                return pd.read_csv(filepath, **kwargs_copy)
+                df = pd.read_csv(filepath, **kwargs_copy)
+                if validate_dataframe(df, filepath.name):
+                    return df
+                else:
+                    raise ValueError("No columns after removing index_col")
             except Exception as e2:
                 print(f"  Failed: {e2}")
                 
@@ -64,7 +82,12 @@ def load_raw_data() -> Dict[str, pd.DataFrame]:
                     print(f"  Attempting: comma separator instead of semicolon...")
                     kwargs_copy = kwargs.copy()
                     kwargs_copy['sep'] = ','
-                    return pd.read_csv(filepath, **kwargs_copy)
+                    kwargs_copy.pop('index_col', None)  # Also remove index_col
+                    df = pd.read_csv(filepath, **kwargs_copy)
+                    if validate_dataframe(df, filepath.name):
+                        return df
+                    else:
+                        raise ValueError("No columns with comma separator")
                 except Exception as e3:
                     print(f"  Failed: {e3}")
                     
@@ -74,7 +97,12 @@ def load_raw_data() -> Dict[str, pd.DataFrame]:
                         kwargs_copy = kwargs.copy()
                         kwargs_copy['on_bad_lines'] = 'skip'
                         kwargs_copy['sep'] = kwargs.get('sep', ',')
-                        return pd.read_csv(filepath, **kwargs_copy)
+                        kwargs_copy.pop('index_col', None)
+                        df = pd.read_csv(filepath, **kwargs_copy)
+                        if validate_dataframe(df, filepath.name):
+                            return df
+                        else:
+                            raise ValueError("No columns after skipping bad lines")
                     except:
                         # Final fallback: try with error_bad_lines=False for older pandas
                         try:
@@ -82,7 +110,12 @@ def load_raw_data() -> Dict[str, pd.DataFrame]:
                             kwargs_copy = kwargs.copy()
                             kwargs_copy['error_bad_lines'] = False
                             kwargs_copy['warn_bad_lines'] = True
-                            return pd.read_csv(filepath, **kwargs_copy)
+                            kwargs_copy.pop('index_col', None)
+                            df = pd.read_csv(filepath, **kwargs_copy)
+                            if validate_dataframe(df, filepath.name):
+                                return df
+                            else:
+                                raise ValueError("No columns with error_bad_lines=False")
                         except Exception as final_error:
                             print(f"  All attempts failed. Last error: {final_error}")
                             raise
@@ -96,12 +129,14 @@ def load_raw_data() -> Dict[str, pd.DataFrame]:
         'procMapping': read_csv_robust(data_path / 'procMapping.csv', sep=';', index_col=0),
     }
     
-    print(f"  demographics: {len(data['demographics'])} rows")
-    print(f"  diagnosis: {len(data['diagnosis'])} rows")
-    print(f"  procedures: {len(data['procedures'])} rows")
-    print(f"  nyu_edu: {len(data['nyu_edu'])} rows")
-    print(f"  sdoh: {len(data['sdoh'])} rows")
-    print(f"  procMapping: {len(data['procMapping'])} rows")
+    print(f"  demographics: {len(data['demographics'])} rows, {len(data['demographics'].columns)} columns")
+    print(f"  diagnosis: {len(data['diagnosis'])} rows, {len(data['diagnosis'].columns)} columns")
+    print(f"  procedures: {len(data['procedures'])} rows, {len(data['procedures'].columns)} columns")
+    print(f"  nyu_edu: {len(data['nyu_edu'])} rows, {len(data['nyu_edu'].columns)} columns")
+    print(f"  sdoh: {len(data['sdoh'])} rows, {len(data['sdoh'].columns)} columns")
+    if len(data['sdoh'].columns) > 0:
+        print(f"    SDOH columns (first 5): {list(data['sdoh'].columns[:5])}")
+    print(f"  procMapping: {len(data['procMapping'])} rows, {len(data['procMapping'].columns)} columns")
     
     # Detect and standardize column names
     data = standardize_column_names(data)

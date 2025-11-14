@@ -287,6 +287,28 @@ def train_model(model, train_data, val_data, model_name, device=config.DEVICE):
     print(f"TRAINING {model_name}")
     print(f"{'='*80}")
     
+    # CRITICAL DIAGNOSTIC: Check training data quality
+    labels_df = train_data['labels']
+    uncensored = (labels_df['days_to_next_ed'] >= 0).sum()
+    positive_30d = labels_df['has_next_ed_30d'].sum()
+    
+    print(f"\n  📊 Training Data Quality Check:")
+    print(f"    Total patients: {len(labels_df)}")
+    print(f"    Uncensored samples (have next ED): {uncensored} ({100*uncensored/len(labels_df):.1f}%)")
+    print(f"    Positive samples (ED within 30d): {positive_30d} ({100*positive_30d/len(labels_df):.1f}%)")
+    
+    if uncensored == 0:
+        print(f"\n    ⚠️  CRITICAL: NO UNCENSORED SAMPLES TO LEARN FROM!")
+        print(f"    ⚠️  MAE will be 0.0 and model will only learn from BCE loss")
+        print(f"    ⚠️  This indicates a data preprocessing issue.")
+    elif uncensored < 10:
+        print(f"\n    ⚠️  WARNING: Very few uncensored samples ({uncensored})")
+        print(f"    ⚠️  Training may be unstable")
+    
+    if positive_30d == 0:
+        print(f"\n    ⚠️  WARNING: No positive samples for 30-day prediction")
+        print(f"    ⚠️  BCE loss may not be meaningful")
+    
     model = model.to(device)
     
     # Create optimizer and scheduler
@@ -366,4 +388,5 @@ if __name__ == "__main__":
     print(f"  Learning rate: {config.LEARNING_RATE}")
     print(f"  Num epochs: {config.NUM_EPOCHS}")
     print(f"  Batch size: {config.BATCH_SIZE}")
+
 

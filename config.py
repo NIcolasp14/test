@@ -175,6 +175,12 @@ ABLATIONS = [
 DETERMINISTIC = True      # Makes training deterministic (slower)
 
 # ============================================================================
+# DATA PROCESSING
+# ============================================================================
+FORCE_REPROCESS = False   # Set to True to force reprocessing even if cache exists
+                          # Useful when you've fixed data parsing issues
+
+# ============================================================================
 # MODEL SELECTION
 # ============================================================================
 MODELS_TO_TRAIN = ['TGN', 'TGAT', 'HGT']  # Which models to train
