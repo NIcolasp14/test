@@ -120,12 +120,48 @@ def load_raw_data() -> Dict[str, pd.DataFrame]:
                             print(f"  All attempts failed. Last error: {final_error}")
                             raise
     
+    # Special handling for SDOH - file has corrupt format with leading comma in header
+    print("  Loading SDOH with special handling...")
+    try:
+        # Read without any index first to see raw data
+        sdoh_test = pd.read_csv(data_path / 'sdoh.csv', nrows=2)
+        if len(sdoh_test.columns) == 1:
+            # The file has malformed CSV - entire header is one column
+            # Read as text and manually fix
+            print("  SDOH: Detected malformed CSV, fixing...")
+            import io
+            with open(data_path / 'sdoh.csv', 'r') as f:
+                lines = f.readlines()
+            
+            # Fix the header by splitting on comma
+            if lines:
+                # Split first line and remove empty first element
+                header = lines[0].strip().split(',')
+                if header[0] == '':
+                    header = header[1:]  # Remove leading empty column
+                
+                # Reconstruct the file
+                fixed_lines = [','.join(header) + '\n'] + lines[1:]
+                fixed_content = ''.join(fixed_lines)
+                
+                # Read from the fixed content
+                sdoh_df = pd.read_csv(io.StringIO(fixed_content), index_col=0)
+                print(f"  SDOH: Successfully parsed {len(sdoh_df)} rows, {len(sdoh_df.columns)} columns")
+        else:
+            # Normal reading worked
+            sdoh_df = sdoh_test
+            # Re-read full file
+            sdoh_df = pd.read_csv(data_path / 'sdoh.csv', index_col=0)
+    except Exception as e:
+        print(f"  SDOH: Error in special handling: {e}, using fallback...")
+        sdoh_df = pd.read_csv(data_path / 'sdoh.csv', index_col=0)
+    
     data = {
         'demographics': read_csv_robust(data_path / 'demographics.csv', index_col=0),
         'diagnosis': read_csv_robust(data_path / 'diagnosis.csv', index_col=0),
         'procedures': read_csv_robust(data_path / 'procedures.csv', index_col=0),
         'nyu_edu': read_csv_robust(data_path / 'nyu_edu.csv', index_col=0),
-        'sdoh': read_csv_robust(data_path / 'sdoh.csv', sep=';', index_col=0),
+        'sdoh': sdoh_df,
         'procMapping': read_csv_robust(data_path / 'procMapping.csv', sep=';', index_col=0),
     }
     
@@ -314,6 +350,46 @@ def time_based_split(data: Dict[str, pd.DataFrame]) -> Tuple[Dict, Dict, Dict]:
     t_train = datetime.strptime(config.T_CUT_TRAIN, '%Y-%m-%d')
     t_val = datetime.strptime(config.T_CUT_VAL, '%Y-%m-%d')
     t_test = datetime.strptime(config.T_CUT_TEST, '%Y-%m-%d')
+    
+    # Check ED visit date range and adjust cutoffs if needed
+    ed_min_date = data['nyu_edu']['timestamp'].min()
+    ed_max_date = data['nyu_edu']['timestamp'].max()
+    
+    print(f"\n  🔍 ED Visit Date Analysis:")
+    print(f"     ED visits range: {ed_min_date.strftime('%Y-%m-%d')} to {ed_max_date.strftime('%Y-%m-%d')}")
+    print(f"     Current train cutoff: {config.T_CUT_TRAIN}")
+    print(f"     Current val cutoff: {config.T_CUT_VAL}")
+    
+    if ed_min_date.to_pydatetime() > t_train:
+        print(f"\n  ⚠️⚠️⚠️  CRITICAL PROBLEM DETECTED  ⚠️⚠️⚠️")
+        print(f"  ALL ED visits start AFTER your train cutoff!")
+        print(f"  This means 0 ED visits in training data!")
+        print(f"\n  🔧 AUTO-FIXING: Adjusting time cutoffs now...")
+        
+        # Calculate new cutoffs based on ED visit dates
+        ed_span = (ed_max_date - ed_min_date).days
+        print(f"     ED visits span {ed_span} days")
+        
+        # Use 60-20-20 split
+        train_cutoff_date = ed_min_date + pd.Timedelta(days=int(ed_span * 0.6))
+        val_cutoff_date = ed_min_date + pd.Timedelta(days=int(ed_span * 0.8))
+        test_cutoff_date = ed_max_date
+        
+        t_train = train_cutoff_date.to_pydatetime()
+        t_val = val_cutoff_date.to_pydatetime()
+        t_test = test_cutoff_date.to_pydatetime()
+        
+        print(f"\n  ✅ NEW CUTOFFS APPLIED:")
+        print(f"     NEW Train cutoff: {t_train.strftime('%Y-%m-%d')} (60% of ED span)")
+        print(f"     NEW Val cutoff:   {t_val.strftime('%Y-%m-%d')} (80% of ED span)")
+        print(f"     NEW Test cutoff:  {t_test.strftime('%Y-%m-%d')} (100%)")
+        print(f"\n  💾 To make this permanent, update config.py:")
+        print(f"     T_CUT_TRAIN = '{t_train.strftime('%Y-%m-%d')}'")
+        print(f"     T_CUT_VAL = '{t_val.strftime('%Y-%m-%d')}'")
+        print(f"     T_CUT_TEST = '{t_test.strftime('%Y-%m-%d')}'")
+        print()
+    else:
+        print(f"  ✓ Cutoffs look reasonable - ED visits overlap with training period")
     
     # Collect all events with timestamps and patient IDs
     all_events = []
