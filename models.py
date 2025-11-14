@@ -259,17 +259,34 @@ class TGAT(nn.Module):
         
         self.pred_head = PredictionHead(hidden_dim)
     
-    def forward(self, node_features, edge_index=None, edge_times=None):
+    def forward(self, patient_nodes_or_features, node_features_or_edge_index=None, edge_times=None):
         """
-        Args:
-            node_features: Initial node features
-            edge_index: Edge connectivity (optional for simplified version)
-            edge_times: Edge timestamps (optional)
+        Flexible forward pass supporting both simplified and full interfaces.
         
-        Returns:
-            delta_pred, binary_logits
+        Simplified interface (for training pipeline compatibility):
+            Args:
+                patient_nodes_or_features: Patient node IDs (tensor, Long) - ignored in simplified mode
+                node_features_or_edge_index: Node features (tensor, Float)
+            Returns:
+                delta_pred, binary_logits from prediction head
+        
+        Full interface:
+            Args:
+                patient_nodes_or_features: Node features (tensor, Float)
+                node_features_or_edge_index: Edge connectivity (optional)
+                edge_times: Edge timestamps (optional)
+            Returns:
+                delta_pred, binary_logits from prediction head
         """
-        x = node_features
+        # Check if using simplified interface (patient_nodes is Long tensor)
+        if patient_nodes_or_features.dtype == torch.long:
+            # Simplified: patient indices + features
+            x = node_features_or_edge_index  # The actual features
+            edge_index = None
+        else:
+            # Full interface: features are first argument
+            x = patient_nodes_or_features
+            edge_index = node_features_or_edge_index
         
         if edge_index is not None and edge_times is not None:
             for layer in self.layers:
@@ -280,10 +297,10 @@ class TGAT(nn.Module):
                 # Create dummy edges (self-loops)
                 num_nodes = x.size(0)
                 dummy_edge_index = torch.stack([
-                    torch.arange(num_nodes),
-                    torch.arange(num_nodes)
+                    torch.arange(num_nodes, dtype=torch.long),
+                    torch.arange(num_nodes, dtype=torch.long)
                 ], dim=0).to(x.device)
-                dummy_times = torch.zeros(num_nodes).to(x.device)
+                dummy_times = torch.zeros(num_nodes, dtype=x.dtype).to(x.device)
                 x = layer(x, dummy_edge_index, dummy_times)
         
         return self.pred_head(x)

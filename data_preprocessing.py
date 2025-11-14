@@ -231,12 +231,21 @@ def create_timestamps(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     
     # ED visit timestamps (nyu_edu)
     ed_date_col = find_column(data['nyu_edu'], 
-                              ['hosp_adm_dt', 'admission_date', 'visit_date', 'date', 'timestamp'], 
+                              ['month_date', 'hosp_adm_dt', 'admission_date', 'visit_date', 'date', 'timestamp'], 
                               'nyu_edu')
     if ed_date_col:
         print(f"  Using '{ed_date_col}' for ED visit timestamps")
         data['nyu_edu']['timestamp'] = data['nyu_edu'][ed_date_col].apply(parse_date)
         data['nyu_edu'] = data['nyu_edu'][data['nyu_edu']['timestamp'].notna()].copy()
+        
+        # Filter out future dates (data quality issue)
+        now = pd.Timestamp.now()
+        future_dates = data['nyu_edu']['timestamp'] > now
+        if future_dates.any():
+            print(f"  ⚠ Warning: Found {future_dates.sum()} ED visits with future dates. Removing them.")
+            print(f"    Future date range: {data['nyu_edu'][future_dates]['timestamp'].min()} to {data['nyu_edu'][future_dates]['timestamp'].max()}")
+            data['nyu_edu'] = data['nyu_edu'][~future_dates].copy()
+        
         print(f"  nyu_edu: {len(data['nyu_edu'])} with valid timestamps")
     else:
         print(f"  Warning: No date column found in nyu_edu. Creating dummy timestamps.")
