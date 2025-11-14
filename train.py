@@ -17,6 +17,38 @@ import config
 from evaluate import evaluate_model, MetricsTracker, print_metrics
 
 
+def focal_loss(logits, targets, alpha=0.25, gamma=2.0):
+    """
+    Focal Loss for extreme class imbalance
+    
+    Args:
+        logits: Raw model outputs (batch_size,)
+        targets: Binary targets (batch_size,)
+        alpha: Weight for positive class (default 0.25)
+        gamma: Focusing parameter (default 2.0)
+    
+    Returns:
+        Focal loss value
+    
+    Reference: https://arxiv.org/abs/1708.02002
+    """
+    bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+    probs = torch.sigmoid(logits)
+    
+    # p_t = p if y == 1, else 1-p
+    p_t = probs * targets + (1 - probs) * (1 - targets)
+    
+    # Focal term: (1 - p_t)^gamma
+    focal_weight = (1 - p_t) ** gamma
+    
+    # Alpha weighting
+    alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+    
+    loss = alpha_t * focal_weight * bce_loss
+    
+    return loss.mean()
+
+
 class EarlyStopper:
     """Early stopping to prevent overfitting"""
     
@@ -74,9 +106,9 @@ def create_scheduler(optimizer, scheduler_type=config.SCHEDULER_TYPE):
         return None
 
 
-def compute_loss(delta_pred, binary_logits, delta_true, binary_true, censored_mask=None, pos_weight=None):
+def compute_loss(delta_pred, binary_logits, delta_true, binary_true, censored_mask=None, pos_weight=None, use_focal=True):
     """
-    Compute multi-task loss: MAE + Weighted BCE
+    Compute multi-task loss: MAE + Focal/Weighted BCE
     
     Args:
         delta_pred: Predicted time-to-event (batch_size, 1) - normalized [0, 1]
@@ -84,7 +116,8 @@ def compute_loss(delta_pred, binary_logits, delta_true, binary_true, censored_ma
         delta_true: True time-to-event (batch_size,) - normalized [0, 1] or -1 for censored
         binary_true: True binary labels (batch_size,)
         censored_mask: Boolean mask for censored samples
-        pos_weight: Weight for positive class in BCE (for class imbalance)
+        pos_weight: Weight for positive class in BCE (for class imbalance) - ignored if use_focal=True
+        use_focal: Use focal loss instead of weighted BCE (better for extreme imbalance)
     
     Returns:
         total_loss, mae_loss, bce_loss
@@ -104,19 +137,31 @@ def compute_loss(delta_pred, binary_logits, delta_true, binary_true, censored_ma
     else:
         mae_loss = torch.tensor(0.0, device=delta_pred.device)
     
-    # Weighted BCE loss for binary classification (handle class imbalance)
+    # Classification loss: Focal Loss (better) or Weighted BCE
     if config.USE_MULTI_TASK:
-        if pos_weight is not None:
-            bce_loss = F.binary_cross_entropy_with_logits(
+        if use_focal and hasattr(config, 'USE_FOCAL_LOSS') and config.USE_FOCAL_LOSS:
+            # Focal Loss for extreme imbalance (5.4% positive class)
+            # alpha=0.25 means positive class gets 0.25 weight, negative gets 0.75
+            # gamma=2.0 focuses on hard examples
+            bce_loss = focal_loss(
                 binary_logits,
                 binary_true.float(),
-                pos_weight=pos_weight
+                alpha=config.FOCAL_ALPHA,
+                gamma=config.FOCAL_GAMMA
             )
         else:
-            bce_loss = F.binary_cross_entropy_with_logits(
-                binary_logits,
-                binary_true.float()
-            )
+            # Fallback to weighted BCE
+            if pos_weight is not None:
+                bce_loss = F.binary_cross_entropy_with_logits(
+                    binary_logits,
+                    binary_true.float(),
+                    pos_weight=pos_weight
+                )
+            else:
+                bce_loss = F.binary_cross_entropy_with_logits(
+                    binary_logits,
+                    binary_true.float()
+                )
     else:
         bce_loss = torch.tensor(0.0, device=delta_pred.device)
     

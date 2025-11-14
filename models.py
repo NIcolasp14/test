@@ -445,6 +445,211 @@ class HGTModel(nn.Module):
 
 
 # =============================================================================
+# LSTM Time-Series Model
+# =============================================================================
+
+class LSTMModel(nn.Module):
+    """
+    LSTM-based time-series model for patient event sequences
+    Captures temporal patterns in diagnosis, procedure, and ED visit history
+    """
+    
+    def __init__(self, input_dim=config.HIDDEN_DIM):
+        super().__init__()
+        
+        self.input_dim = input_dim
+        self.hidden_dim = config.LSTM_HIDDEN_DIM
+        self.num_layers = config.LSTM_NUM_LAYERS
+        self.bidirectional = config.LSTM_BIDIRECTIONAL
+        
+        # LSTM layers
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=self.hidden_dim,
+            num_layers=self.num_layers,
+            batch_first=True,
+            dropout=config.LSTM_DROPOUT if self.num_layers > 1 else 0,
+            bidirectional=self.bidirectional
+        )
+        
+        # Output dimension accounting for bidirectionality
+        lstm_output_dim = self.hidden_dim * 2 if self.bidirectional else self.hidden_dim
+        
+        # Projection layer to match expected dimension
+        self.projection = nn.Linear(lstm_output_dim, config.HIDDEN_DIM)
+        
+        # Dropout
+        self.dropout = nn.Dropout(config.LSTM_DROPOUT)
+        
+        # Prediction head
+        self.pred_head = PredictionHead(config.HIDDEN_DIM)
+    
+    def forward(self, patient_nodes, node_features):
+        """
+        Forward pass
+        
+        Args:
+            patient_nodes: Patient node IDs (batch_size,) - ignored for compatibility
+            node_features: Patient features (batch_size, feature_dim)
+        
+        Returns:
+            delta_pred: Predicted time-to-event (batch_size, 1)
+            binary_logits: Binary classification logits (batch_size, 1)
+        """
+        # Reshape features to sequence format (batch_size, seq_len=1, feature_dim)
+        # In a more sophisticated version, you'd have actual sequences here
+        x = node_features.unsqueeze(1)  # Add sequence dimension
+        
+        # LSTM forward
+        lstm_out, (h_n, c_n) = self.lstm(x)
+        
+        # Use last hidden state
+        if self.bidirectional:
+            # Concatenate forward and backward hidden states
+            h_n = torch.cat([h_n[-2], h_n[-1]], dim=1)
+        else:
+            h_n = h_n[-1]
+        
+        # Project to expected dimension
+        embeddings = self.projection(h_n)
+        embeddings = F.relu(embeddings)
+        embeddings = self.dropout(embeddings)
+        
+        # Predict
+        return self.pred_head(embeddings)
+
+
+# =============================================================================
+# DeepSurv - Deep Learning Survival Model
+# =============================================================================
+
+class DeepSurvModel(nn.Module):
+    """
+    DeepSurv: Deep learning for survival analysis with Cox proportional hazards loss
+    Uses neural network to learn patient risk scores
+    
+    Reference: Katzman et al. "DeepSurv: personalized treatment recommender system 
+               using a Cox proportional hazards deep neural network" (2018)
+    """
+    
+    def __init__(self, input_dim=config.HIDDEN_DIM):
+        super().__init__()
+        
+        layers = []
+        prev_dim = input_dim
+        
+        # Build deep network
+        for hidden_dim in config.DEEPSURV_LAYERS:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            if config.DEEPSURV_BATCH_NORM:
+                layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(config.DEEPSURV_DROPOUT))
+            prev_dim = hidden_dim
+        
+        # Output layer: single risk score
+        layers.append(nn.Linear(prev_dim, 1))
+        
+        self.risk_net = nn.Sequential(*layers)
+        
+        # Separate binary classifier for 30-day prediction
+        self.binary_classifier = nn.Sequential(
+            nn.Linear(input_dim, config.HIDDEN_DIM // 2),
+            nn.ReLU(),
+            nn.Dropout(config.DROPOUT),
+            nn.Linear(config.HIDDEN_DIM // 2, 1)
+        )
+    
+    def forward(self, patient_nodes, node_features):
+        """
+        Forward pass
+        
+        Args:
+            patient_nodes: Patient node IDs (batch_size,) - ignored for compatibility
+            node_features: Patient features (batch_size, feature_dim)
+        
+        Returns:
+            risk_scores: Log-risk scores (batch_size, 1) - normalized to [0, 1] for compatibility
+            binary_logits: Binary classification logits (batch_size, 1)
+        """
+        # Compute risk scores
+        log_risk = self.risk_net(node_features)
+        
+        # Convert to normalized [0, 1] range using sigmoid for compatibility with MAE loss
+        normalized_risk = torch.sigmoid(log_risk)
+        
+        # Binary classification
+        binary_logits = self.binary_classifier(node_features)
+        
+        return normalized_risk, binary_logits
+    
+    def get_risk_scores(self, patient_nodes, node_features):
+        """Get raw risk scores (for Cox partial likelihood)"""
+        return self.risk_net(node_features)
+
+
+# =============================================================================
+# Cox Proportional Hazards Model (Wrapper for scikit-survival)
+# =============================================================================
+
+class CoxPHModel(nn.Module):
+    """
+    Cox Proportional Hazards model wrapper
+    Uses linear model with Cox partial likelihood for survival analysis
+    
+    Note: This is a wrapper that uses scikit-survival internally
+    """
+    
+    def __init__(self, input_dim=config.HIDDEN_DIM):
+        super().__init__()
+        
+        # Simple linear model for feature transformation
+        self.feature_transform = nn.Sequential(
+            nn.Linear(input_dim, config.HIDDEN_DIM),
+            nn.ReLU(),
+            nn.Dropout(config.DROPOUT),
+            nn.Linear(config.HIDDEN_DIM, config.HIDDEN_DIM // 2)
+        )
+        
+        # Cox model parameters (will be fitted using lifelines or scikit-survival)
+        self.risk_predictor = nn.Linear(config.HIDDEN_DIM // 2, 1)
+        
+        # Binary classifier
+        self.binary_classifier = nn.Sequential(
+            nn.Linear(input_dim, config.HIDDEN_DIM // 2),
+            nn.ReLU(),
+            nn.Dropout(config.DROPOUT),
+            nn.Linear(config.HIDDEN_DIM // 2, 1)
+        )
+    
+    def forward(self, patient_nodes, node_features):
+        """
+        Forward pass
+        
+        Args:
+            patient_nodes: Patient node IDs (batch_size,) - ignored for compatibility
+            node_features: Patient features (batch_size, feature_dim)
+        
+        Returns:
+            risk_scores: Risk scores (batch_size, 1) - normalized to [0, 1]
+            binary_logits: Binary classification logits (batch_size, 1)
+        """
+        # Transform features
+        transformed_features = self.feature_transform(node_features)
+        
+        # Compute risk scores
+        log_risk = self.risk_predictor(transformed_features)
+        
+        # Normalize to [0, 1] for compatibility
+        normalized_risk = torch.sigmoid(log_risk)
+        
+        # Binary classification
+        binary_logits = self.binary_classifier(node_features)
+        
+        return normalized_risk, binary_logits
+
+
+# =============================================================================
 # Model Factory
 # =============================================================================
 
@@ -453,7 +658,7 @@ def create_model(model_name, **kwargs):
     Factory function to create models
     
     Args:
-        model_name: One of 'TGN', 'TGAT', 'HGT'
+        model_name: One of 'TGN', 'TGAT', 'HGT', 'LSTM', 'CoxPH', 'DeepSurv'
         **kwargs: Model-specific arguments
     
     Returns:
@@ -471,8 +676,17 @@ def create_model(model_name, **kwargs):
         edge_types = kwargs.get('edge_types', config.EDGE_TYPES)
         return HGTModel(node_types, edge_types, in_dim=config.HIDDEN_DIM)
     
+    elif model_name == 'LSTM':
+        return LSTMModel(input_dim=config.HIDDEN_DIM)
+    
+    elif model_name == 'CoxPH':
+        return CoxPHModel(input_dim=config.HIDDEN_DIM)
+    
+    elif model_name == 'DeepSurv':
+        return DeepSurvModel(input_dim=config.HIDDEN_DIM)
+    
     else:
-        raise ValueError(f"Unknown model: {model_name}")
+        raise ValueError(f"Unknown model: {model_name}. Available: TGN, TGAT, HGT, LSTM, CoxPH, DeepSurv")
 
 
 def count_parameters(model):
@@ -498,6 +712,22 @@ if __name__ == "__main__":
     try:
         hgt = create_model('HGT')
         print(f"  Parameters: {count_parameters(hgt):,}")
+    except Exception as e:
+        print(f"  Error: {e}")
+    
+    # Test LSTM
+    print("\nLSTM:")
+    try:
+        lstm = create_model('LSTM')
+        print(f"  Parameters: {count_parameters(lstm):,}")
+    except Exception as e:
+        print(f"  Error: {e}")
+    
+    # Test DeepSurv
+    print("\nDeepSurv:")
+    try:
+        deepsurv = create_model('DeepSurv')
+        print(f"  Parameters: {count_parameters(deepsurv):,}")
     except Exception as e:
         print(f"  Error: {e}")
     

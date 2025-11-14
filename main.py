@@ -21,6 +21,7 @@ from graph_construction import build_all_graphs
 from models import create_model, count_parameters
 from train import train_model
 from evaluate import evaluate_model, print_metrics, MetricsTracker
+from cross_validation import train_with_cross_validation, create_stratified_folds, save_cv_results
 
 # Set random seeds for reproducibility
 torch.manual_seed(config.SEED)
@@ -312,6 +313,82 @@ def create_results_table(results):
     return results_df
 
 
+def train_all_models_cv(full_data, labels_df, graphs):
+    """
+    Train all models using k-fold cross-validation
+    
+    Args:
+        full_data: Full dataset dictionary
+        labels_df: All labels (train + val + test combined)
+        graphs: Graph data
+    
+    Returns:
+        cv_results: Dictionary with CV results for each model
+    """
+    print(f"\n{'='*80}")
+    print(f"K-FOLD CROSS-VALIDATION MODE")
+    print(f"  Number of folds: {config.K_FOLDS}")
+    print(f"{'='*80}")
+    
+    cv_results = {}
+    
+    for model_name in config.MODELS_TO_TRAIN:
+        try:
+            print(f"\n{'='*80}")
+            print(f"MODEL: {model_name} (K-Fold CV)")
+            print(f"{'='*80}")
+            
+            # Run k-fold CV
+            model_cv_results = train_with_cross_validation(
+                model_name=model_name,
+                full_data=full_data,
+                labels_df=labels_df,
+                graphs=graphs,
+                n_folds=config.K_FOLDS,
+                device=config.DEVICE
+            )
+            
+            cv_results[model_name] = model_cv_results
+            
+            # Save results
+            save_cv_results(model_cv_results, model_name)
+            
+        except Exception as e:
+            print(f"\n  ✗ Error training {model_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    # Create comparison table
+    if cv_results:
+        print(f"\n{'='*80}")
+        print("CROSS-VALIDATION RESULTS COMPARISON")
+        print(f"{'='*80}")
+        
+        # Create DataFrame for comparison
+        comparison_data = []
+        for model_name, results in cv_results.items():
+            row = {'Model': model_name}
+            # Add mean metrics
+            for key, value in results.items():
+                if key.endswith('_mean'):
+                    metric_name = key.replace('_mean', '')
+                    std_value = results.get(f"{metric_name}_std", 0)
+                    row[metric_name] = f"{value:.4f} ± {std_value:.4f}"
+            comparison_data.append(row)
+        
+        comparison_df = pd.DataFrame(comparison_data)
+        print(f"\n{comparison_df.to_string(index=False)}")
+        
+        # Save comparison
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        results_file = Path(config.RESULTS_DIR) / f'cv_comparison_{timestamp}.csv'
+        comparison_df.to_csv(results_file, index=False)
+        print(f"\n  ✓ Saved comparison to {results_file}")
+    
+    return cv_results
+
+
 def main():
     """Main execution pipeline"""
     print("\n" + "="*80)
@@ -322,8 +399,13 @@ def main():
     # Setup
     setup_directories()
     
+    eval_mode = "K-Fold CV" if config.USE_CROSS_VALIDATION else "Temporal Split"
+    
     print(f"\nConfiguration:")
     print(f"  Device: {config.DEVICE}")
+    print(f"  Evaluation: {eval_mode}")
+    if config.USE_CROSS_VALIDATION:
+        print(f"  K-Folds: {config.K_FOLDS}")
     print(f"  Models: {', '.join(config.MODELS_TO_TRAIN)}")
     print(f"  Hidden dim: {config.HIDDEN_DIM}")
     print(f"  Num epochs: {config.NUM_EPOCHS}")
@@ -338,17 +420,48 @@ def main():
     # Step 3: Graph Construction
     graphs = run_graph_construction()
     
-    # Step 4: Prepare Training Data
-    train_dict, val_dict, test_dict = prepare_training_data(graphs, features)
-    
-    # Step 5: Train Models
-    results = train_all_models(train_dict, val_dict, test_dict)
-    
-    # Step 6: Create Results Table
-    if results:
-        results_df = create_results_table(results)
+    # Step 4: Choose evaluation strategy
+    if config.USE_CROSS_VALIDATION:
+        # Combine all data for k-fold CV
+        print("\n  Using K-Fold Cross-Validation...")
+        
+        # Combine labels from all splits
+        all_labels = pd.concat([train_labels, val_labels, test_labels], ignore_index=True)
+        
+        # Prepare full data dictionary
+        full_data = {
+            'node_id_maps': graphs['node_id_maps']['train'],  # Use train maps as base
+            'reverse_node_maps': graphs['reverse_node_maps']['train'],
+            'node_features': {}
+        }
+        
+        # Combine node features from all splits
+        for node_type in ['patient', 'diagnosis', 'procedure', 'provider']:
+            try:
+                train_feat = graphs['train_graph'][node_type].x if hasattr(graphs['train_graph'], '__getitem__') else None
+                if train_feat is not None:
+                    full_data['node_features'][node_type] = train_feat
+            except:
+                pass
+        
+        # Train with k-fold CV
+        results = train_all_models_cv(full_data, all_labels, graphs)
+        
     else:
-        print("\n  ✗ No results to display (all models failed)")
+        # Use temporal split
+        print("\n  Using Temporal Split Evaluation...")
+        
+        # Step 4: Prepare Training Data
+        train_dict, val_dict, test_dict = prepare_training_data(graphs, features)
+        
+        # Step 5: Train Models
+        results = train_all_models(train_dict, val_dict, test_dict)
+        
+        # Step 6: Create Results Table
+        if results:
+            results_df = create_results_table(results)
+        else:
+            print("\n  ✗ No results to display (all models failed)")
     
     print(f"\n{'='*80}")
     print("PIPELINE COMPLETE")

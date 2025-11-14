@@ -14,7 +14,15 @@ MODEL_SAVE_DIR = "models"
 RESULTS_DIR = "results"
 
 # ============================================================================
-# TIME-BASED SPLITS (YYYY-MM-DD)
+# EVALUATION STRATEGY
+# ============================================================================
+USE_CROSS_VALIDATION = True   # Use k-fold CV instead of temporal split
+                             # Set to False to use temporal split below
+K_FOLDS = 5                  # Number of folds for cross-validation
+CV_RANDOM_STATE = 42         # Random seed for CV fold creation
+
+# ============================================================================
+# TIME-BASED SPLITS (YYYY-MM-DD) - Only used if USE_CROSS_VALIDATION = False
 # ============================================================================
 T_CUT_TRAIN = "2020-12-31"  # Training data up to this date
 T_CUT_VAL = "2021-12-31"    # Validation data up to this date
@@ -73,6 +81,22 @@ TGAT_DROPOUT = 0.1
 HGT_NUM_HEADS = 4
 HGT_USE_NORM = True
 
+# LSTM/Time-series specific
+LSTM_HIDDEN_DIM = 128
+LSTM_NUM_LAYERS = 2
+LSTM_DROPOUT = 0.3
+LSTM_BIDIRECTIONAL = True
+MAX_SEQUENCE_LENGTH = 50  # Maximum number of events per patient to use
+
+# Cox Proportional Hazards specific
+COX_ALPHA = 0.1          # L2 regularization for Cox model
+COX_MAX_ITER = 1000      # Maximum iterations
+
+# DeepSurv specific
+DEEPSURV_LAYERS = [128, 64, 32]  # Hidden layer sizes
+DEEPSURV_DROPOUT = 0.3
+DEEPSURV_BATCH_NORM = True
+
 # Prediction head
 USE_MULTI_TASK = True     # Both time-to-event and binary classification
 BINARY_THRESHOLD_DAYS = 30  # Predict if ED visit within N days
@@ -90,6 +114,11 @@ GRAD_CLIP = 1.0
 # Loss weights (adjusted for class imbalance and poor regression performance)
 LAMBDA_BCE = 5.0          # Weight for binary classification loss (INCREASED - focus on classification with severe imbalance)
 LAMBDA_MAE = 0.1          # Weight for MAE loss (DECREASED - regression not working well with 82% censored data)
+
+# Focal Loss for extreme class imbalance (better than weighted BCE for 5.4% positive class)
+USE_FOCAL_LOSS = True     # Use focal loss instead of weighted BCE
+FOCAL_ALPHA = 0.25        # Weight for positive class (0.25 for rare class)
+FOCAL_GAMMA = 2.0         # Focusing parameter (2.0 standard, higher = more focus on hard examples)
 
 # Optimizer
 OPTIMIZER = "adamw"       # Options: "adam", "adamw", "sgd"
@@ -184,8 +213,12 @@ FORCE_REPROCESS = False   # Set to True to force reprocessing even if cache exis
 # ============================================================================
 # MODEL SELECTION
 # ============================================================================
-MODELS_TO_TRAIN = ['TGN', 'TGAT', 'HGT']  # Which models to train
-# Options: 'TGN', 'TGAT', 'HGT' or ['TGN'] for single model
+MODELS_TO_TRAIN = ['TGN', 'TGAT', 'LSTM', 'CoxPH', 'DeepSurv']  # Which models to train
+# Options: 
+#   Graph models: 'TGN', 'TGAT', 'HGT'
+#   Time-series: 'LSTM', 'Transformer'
+#   Survival models: 'CoxPH', 'DeepSurv'
+#   Classical: 'LogisticRegression', 'RandomForest', 'XGBoost'
 
 # ============================================================================
 # SANITY CHECKS
