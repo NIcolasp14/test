@@ -375,8 +375,12 @@ def train_model(model, train_data, val_data, model_name, device=config.DEVICE):
     
     print(f"\n  Best validation {config.PRIMARY_METRIC}: {best_val_metric:.4f} (epoch {best_epoch})")
     
-    # Load best model
-    checkpoint = torch.load(Path(config.MODEL_SAVE_DIR) / f'{model_name}_best.pt')
+    # Load best model (PyTorch 2.6+ requires weights_only=False for checkpoints with numpy)
+    checkpoint = torch.load(
+        Path(config.MODEL_SAVE_DIR) / f'{model_name}_best.pt',
+        map_location=device,
+        weights_only=False  # Required for PyTorch 2.6+ with numpy objects
+    )
     model.load_state_dict(checkpoint['model_state_dict'])
     
     return model, metrics_tracker

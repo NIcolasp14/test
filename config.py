@@ -57,7 +57,7 @@ MIN_CODE_FREQUENCY = 2  # Codes appearing less than this become UNK
 # ============================================================================
 HIDDEN_DIM = 128
 NUM_LAYERS = 3
-DROPOUT = 0.1
+DROPOUT = 0.3  # Increased from 0.1 for better regularization
 
 # TGN specific
 TGN_MEMORY_DIM = 128
@@ -81,14 +81,14 @@ BINARY_THRESHOLD_DAYS = 30  # Predict if ED visit within N days
 # TRAINING
 # ============================================================================
 BATCH_SIZE = 32
-NUM_EPOCHS = 100
-LEARNING_RATE = 1e-3
-WEIGHT_DECAY = 1e-4
+NUM_EPOCHS = 150  # Increased from 100
+LEARNING_RATE = 3e-4  # Decreased from 1e-3 for stability
+WEIGHT_DECAY = 5e-3  # Increased from 1e-4 for regularization
 GRAD_CLIP = 1.0
 
-# Loss weights
-LAMBDA_BCE = 0.5          # Weight for binary classification loss
-LAMBDA_MAE = 1.0          # Weight for MAE loss
+# Loss weights (adjusted for class imbalance)
+LAMBDA_BCE = 2.0          # Weight for binary classification loss (increased - more important with imbalance)
+LAMBDA_MAE = 0.5          # Weight for MAE loss (decreased - too noisy with censored data)
 
 # Optimizer
 OPTIMIZER = "adamw"       # Options: "adam", "adamw", "sgd"
@@ -99,10 +99,10 @@ SCHEDULER_TYPE = "cosine" # Options: "cosine", "step", "plateau"
 T_MAX = 20                # For cosine annealing
 SCHEDULER_PATIENCE = 10   # For plateau scheduler
 
-# Early stopping
+# Early stopping (adjusted for AUROC metric)
 EARLY_STOPPING = True
-PATIENCE = 10
-MIN_DELTA = 1e-4          # Minimum improvement to count as progress
+PATIENCE = 20  # Increased from 10 - more patience for AUROC improvements
+MIN_DELTA = 0.01  # Increased from 1e-4 - require meaningful improvements
 
 # ============================================================================
 # SAMPLING (for mini-batch training)
@@ -130,7 +130,7 @@ TRACK_METRICS = [
     'auroc_90d',      # AUROC for 90-day window
 ]
 
-PRIMARY_METRIC = 'c_index'  # For early stopping and model selection
+PRIMARY_METRIC = 'auroc_30d'  # For early stopping and model selection (better for imbalanced data)
 
 # Bootstrap confidence intervals
 BOOTSTRAP_SAMPLES = 1000
