@@ -16,7 +16,13 @@ warnings.filterwarnings('ignore')
 # Import pipeline modules
 import config
 from data_preprocessing import preprocess_pipeline
-from feature_engineering import extract_all_features
+try:
+    from feature_engineering import engineer_all_features
+    HAS_FEATURE_ENGINEERING = True
+except ImportError:
+    HAS_FEATURE_ENGINEERING = False
+    print("⚠️  Warning: feature_engineering.py not found - will use basic features only")
+
 from graph_construction import build_all_graphs
 from models import create_model, count_parameters
 from train import train_model
@@ -99,7 +105,46 @@ def run_feature_extraction(train_data, val_data, test_data):
         return features
     else:
         print("\nRunning feature extraction pipeline...")
-        return extract_all_features(train_data, val_data, test_data)
+        
+        if HAS_FEATURE_ENGINEERING:
+            # Use engineered features
+            print("  Using engineered temporal features...")
+            try:
+                # Engineer features from train data
+                train_features = engineer_all_features(train_data)
+                val_features = engineer_all_features(val_data)
+                test_features = engineer_all_features(test_data)
+                
+                features = {
+                    'train': train_features,
+                    'val': val_features,
+                    'test': test_features
+                }
+                
+                # Save features
+                output_dir.mkdir(exist_ok=True)
+                with open(output_dir / 'features.pkl', 'wb') as f:
+                    pickle.dump(features, f)
+                
+                return features
+            except Exception as e:
+                print(f"  ⚠️  Error in feature engineering: {e}")
+                print(f"  Falling back to basic features...")
+        
+        # Fallback: return empty features (graphs will still work)
+        print("  Using basic graph features only...")
+        features = {
+            'train': None,
+            'val': None,
+            'test': None
+        }
+        
+        # Save empty features
+        output_dir.mkdir(exist_ok=True)
+        with open(output_dir / 'features.pkl', 'wb') as f:
+            pickle.dump(features, f)
+        
+        return features
 
 
 def run_graph_construction():
