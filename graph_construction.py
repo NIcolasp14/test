@@ -307,15 +307,20 @@ class HeteroGraphBuilder:
         
         node_features = {}
         
-        # Patient features
+        # Check if features are available
+        if not self.features or not any(key.endswith('_features') or key.endswith('_embeddings') for key in self.features.keys()):
+            print(f"  ⚠️  Warning: No extracted features found for {split_name} split.")
+            print(f"     Using zero-initialized features (dimension: {config.PROJECTED_DIM})")
+            print(f"     For better results, ensure feature_extraction.py is working correctly")
+        
+        # Patient features (with fallback to zero features if not available)
         patient_feat_list = []
+        patient_feat_key = f'{split_name}_patient_features'
+        
         for pid in patient_ids:
-            if split_name == 'train':
-                feat = self.features['train_patient_features'].get(pid)
-            elif split_name == 'val':
-                feat = self.features['val_patient_features'].get(pid)
-            else:
-                feat = self.features['test_patient_features'].get(pid)
+            feat = None
+            if self.features and patient_feat_key in self.features:
+                feat = self.features[patient_feat_key].get(pid)
             
             if feat is None:
                 feat = torch.zeros(config.PROJECTED_DIM)
@@ -323,40 +328,70 @@ class HeteroGraphBuilder:
         
         node_features['patient'] = torch.stack(patient_feat_list)
         
-        # Dx code features
+        # Dx code features (with fallback)
         dx_feat_list = []
+        has_code_embeddings = self.features and 'code_embeddings' in self.features
+        
         for code in sorted(dx_codes):
-            feat = self.features['code_embeddings'].get(code)
+            feat = None
+            if has_code_embeddings:
+                feat = self.features['code_embeddings'].get(code)
+                if feat is None and config.UNK_TOKEN in self.features['code_embeddings']:
+                    feat = self.features['code_embeddings'][config.UNK_TOKEN]
+            
             if feat is None:
-                feat = self.features['code_embeddings'][config.UNK_TOKEN]
+                feat = torch.zeros(config.PROJECTED_DIM)
             dx_feat_list.append(feat)
+        
         node_features['dx_code'] = torch.stack(dx_feat_list)
         
-        # Proc code features
+        # Proc code features (with fallback)
         proc_feat_list = []
         for code in sorted(proc_codes):
-            feat = self.features['code_embeddings'].get(code)
+            feat = None
+            if has_code_embeddings:
+                feat = self.features['code_embeddings'].get(code)
+                if feat is None and config.UNK_TOKEN in self.features['code_embeddings']:
+                    feat = self.features['code_embeddings'][config.UNK_TOKEN]
+            
             if feat is None:
-                feat = self.features['code_embeddings'][config.UNK_TOKEN]
+                feat = torch.zeros(config.PROJECTED_DIM)
             proc_feat_list.append(feat)
+        
         node_features['proc_code'] = torch.stack(proc_feat_list)
         
-        # Provider features
+        # Provider features (with fallback)
         provider_feat_list = []
+        has_provider_embeddings = self.features and 'provider_embeddings' in self.features
+        
         for provider in sorted(providers):
-            feat = self.features['provider_embeddings'].get(provider)
+            feat = None
+            if has_provider_embeddings:
+                feat = self.features['provider_embeddings'].get(provider)
+                if feat is None and config.UNK_TOKEN in self.features['provider_embeddings']:
+                    feat = self.features['provider_embeddings'][config.UNK_TOKEN]
+            
             if feat is None:
-                feat = self.features['provider_embeddings'][config.UNK_TOKEN]
+                feat = torch.zeros(config.PROJECTED_DIM)
             provider_feat_list.append(feat)
+        
         node_features['provider'] = torch.stack(provider_feat_list)
         
-        # Hospital features
+        # Hospital features (with fallback)
         hospital_feat_list = []
+        has_hospital_embeddings = self.features and 'hospital_embeddings' in self.features
+        
         for hospital in sorted(hospitals):
-            feat = self.features['hospital_embeddings'].get(hospital)
+            feat = None
+            if has_hospital_embeddings:
+                feat = self.features['hospital_embeddings'].get(hospital)
+                if feat is None and config.UNK_TOKEN in self.features['hospital_embeddings']:
+                    feat = self.features['hospital_embeddings'][config.UNK_TOKEN]
+            
             if feat is None:
-                feat = self.features['hospital_embeddings'][config.UNK_TOKEN]
+                feat = torch.zeros(config.PROJECTED_DIM)
             hospital_feat_list.append(feat)
+        
         node_features['hospital'] = torch.stack(hospital_feat_list)
         
         # Visit features (aggregate from connected nodes - simple zero init for now)
