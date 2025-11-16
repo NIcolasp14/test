@@ -201,22 +201,36 @@ def train_epoch(model, train_data, optimizer, device, epoch):
     patients_with_labels = labels_df['patient_id'].unique()
     
     # Filter patient nodes to only those with labels
-    node_id_map = train_data['node_id_maps']['patient']
-    reverse_node_map = train_data['reverse_node_maps']['patient']
-    
-    # Create patient_nodes only for patients with labels
+    # CRITICAL: Map patient IDs to their position in node_features, not to original graph node IDs
     patient_nodes_list = []
     patient_ids = []
     
+    # Get node features
+    node_features_full = train_data['node_features']['patient'].to(device)
+    
+    # Create mapping from patient_id to index in node_features
+    # This handles cases where node_features might be filtered/aligned differently than node_id_map
+    reverse_node_map = train_data.get('reverse_node_maps', {}).get('patient', {})
+    
+    # Build patient_id -> feature_index mapping
+    pid_to_feat_idx = {}
+    for feat_idx, pid in reverse_node_map.items():
+        pid_to_feat_idx[pid] = feat_idx
+    
     for pid in patients_with_labels:
-        if pid in node_id_map:
-            patient_nodes_list.append(node_id_map[pid])
-            patient_ids.append(pid)
+        if pid in pid_to_feat_idx:
+            # Use the index in node_features, not the original graph node ID
+            feat_idx = pid_to_feat_idx[pid]
+            # Validate index is in bounds
+            if feat_idx < len(node_features_full):
+                patient_nodes_list.append(feat_idx)
+                patient_ids.append(pid)
+    
+    if len(patient_nodes_list) == 0:
+        raise ValueError(f"No valid patient nodes found for training! Check node_features alignment.")
     
     patient_nodes = torch.tensor(patient_nodes_list, dtype=torch.long).to(device)
     
-    # Get node features for these patients
-    node_features_full = train_data['node_features']['patient'].to(device)
     # Index only the patients we're using
     node_features = node_features_full[patient_nodes]
     
@@ -334,22 +348,36 @@ def validate(model, val_data, device):
     # Get unique patient IDs that have labels
     patients_with_labels = labels_df['patient_id'].unique()
     
-    # Filter patient nodes to only those with labels
-    node_id_map = val_data['node_id_maps']['patient']
-    
-    # Create patient_nodes only for patients with labels
+    # CRITICAL: Map patient IDs to their position in node_features, not to original graph node IDs
     patient_nodes_list = []
     patient_ids = []
     
+    # Get node features
+    node_features_full = val_data['node_features']['patient'].to(device)
+    
+    # Create mapping from patient_id to index in node_features
+    reverse_node_map = val_data.get('reverse_node_maps', {}).get('patient', {})
+    
+    # Build patient_id -> feature_index mapping
+    pid_to_feat_idx = {}
+    for feat_idx, pid in reverse_node_map.items():
+        pid_to_feat_idx[pid] = feat_idx
+    
     for pid in patients_with_labels:
-        if pid in node_id_map:
-            patient_nodes_list.append(node_id_map[pid])
-            patient_ids.append(pid)
+        if pid in pid_to_feat_idx:
+            # Use the index in node_features, not the original graph node ID
+            feat_idx = pid_to_feat_idx[pid]
+            # Validate index is in bounds
+            if feat_idx < len(node_features_full):
+                patient_nodes_list.append(feat_idx)
+                patient_ids.append(pid)
+    
+    if len(patient_nodes_list) == 0:
+        raise ValueError(f"No valid patient nodes found for validation! Check node_features alignment.")
     
     patient_nodes = torch.tensor(patient_nodes_list, dtype=torch.long).to(device)
     
-    # Get node features for these patients
-    node_features_full = val_data['node_features']['patient'].to(device)
+    # Index only the patients we're using
     node_features = node_features_full[patient_nodes]
     
     # Reset patient_nodes to be 0-indexed
