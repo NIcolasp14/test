@@ -5,12 +5,148 @@ Addresses label starvation, class imbalance, and feature quality issues
 
 import pandas as pd
 import numpy as np
+import torch
 from datetime import datetime, timedelta
 from pathlib import Path
 import pickle
 from typing import Dict, Tuple, List
 from collections import defaultdict
 import config
+
+def create_patient_features_time_aware(data: Dict[str, pd.DataFrame], 
+                                       labels_df: pd.DataFrame) -> Dict[int, torch.Tensor]:
+    """
+    Create time-aware features for each (patient, observation_time) in labels.
+    
+    CRITICAL: Features computed using ONLY events BEFORE observation_time.
+    No information leakage.
+    
+    Returns:
+        Dict mapping label index to feature tensor
+    """
+    print(f"\n  Creating time-aware features (NO LEAKAGE)...")
+    print(f"    {len(labels_df)} prediction instances")
+    
+    ed_visits = data['nyu_edu']
+    diagnosis = data['diagnosis']
+    procedures = data['procedures']
+    demographics = data['demographics']
+    
+    feature_dict = {}
+    feature_names = []
+    
+    for idx, row in labels_df.iterrows():
+        patient_id = row['patient_id']
+        obs_time = row['observation_time']
+        
+        # Filter to ONLY events BEFORE observation time (NO LEAKAGE)
+        patient_ed_before = ed_visits[
+            (ed_visits['sys_mbr_sk'] == patient_id) & 
+            (ed_visits['timestamp'] < obs_time)
+        ].sort_values('timestamp')
+        
+        patient_dx_before = diagnosis[
+            (diagnosis['clm_sys_mbr_sk'] == patient_id) & 
+            (diagnosis['timestamp'] < obs_time)
+        ].sort_values('timestamp')
+        
+        patient_proc_before = procedures[
+            (procedures['sys_mbr_sk'] == patient_id) & 
+            (procedures['timestamp'] < obs_time)
+        ].sort_values('timestamp')
+        
+        feat = {}
+        
+        # Demographics (static)
+        patient_demo = demographics[demographics['sys_mbr_sk'] == patient_id]
+        if len(patient_demo) > 0:
+            demo = patient_demo.iloc[0]
+            if 'dob' in demo.index and pd.notna(demo['dob']):
+                feat['age'] = (obs_time - demo['dob']).days / 365.25
+            else:
+                feat['age'] = 50.0
+            feat['is_male'] = 1.0 if demo.get('mbr_gender_cd') == 'M' else 0.0
+        else:
+            feat['age'] = 50.0
+            feat['is_male'] = 0.0
+        
+        # ED recency & frequency (ONLY BEFORE obs_time)
+        if len(patient_ed_before) > 0:
+            last_ed_time = patient_ed_before['timestamp'].max()
+            feat['days_since_last_ed'] = (obs_time - last_ed_time).days
+            feat['had_any_ed'] = 1.0
+            feat['ed_count_7d'] = len(patient_ed_before[patient_ed_before['timestamp'] > (obs_time - timedelta(days=7))])
+            feat['ed_count_30d'] = len(patient_ed_before[patient_ed_before['timestamp'] > (obs_time - timedelta(days=30))])
+            feat['ed_count_90d'] = len(patient_ed_before[patient_ed_before['timestamp'] > (obs_time - timedelta(days=90))])
+            feat['ed_count_365d'] = len(patient_ed_before[patient_ed_before['timestamp'] > (obs_time - timedelta(days=365))])
+            feat['ed_count_all_time'] = len(patient_ed_before)
+            if feat['ed_count_365d'] > 0:
+                feat['ed_trend'] = feat['ed_count_30d'] / feat['ed_count_365d']
+            else:
+                feat['ed_trend'] = 0.0
+        else:
+            feat['days_since_last_ed'] = -1.0  # Sentinel: never had ED
+            feat['had_any_ed'] = 0.0
+            feat['ed_count_7d'] = 0.0
+            feat['ed_count_30d'] = 0.0
+            feat['ed_count_90d'] = 0.0
+            feat['ed_count_365d'] = 0.0
+            feat['ed_count_all_time'] = 0.0
+            feat['ed_trend'] = 0.0
+        
+        # Diagnosis history
+        if len(patient_dx_before) > 0:
+            feat['days_since_last_dx'] = (obs_time - patient_dx_before['timestamp'].max()).days
+            feat['dx_count_30d'] = len(patient_dx_before[patient_dx_before['timestamp'] > (obs_time - timedelta(days=30))])
+            feat['dx_count_365d'] = len(patient_dx_before[patient_dx_before['timestamp'] > (obs_time - timedelta(days=365))])
+            feat['dx_count_all_time'] = len(patient_dx_before)
+        else:
+            feat['days_since_last_dx'] = -1.0
+            feat['dx_count_30d'] = 0.0
+            feat['dx_count_365d'] = 0.0
+            feat['dx_count_all_time'] = 0.0
+        
+        # Procedure history
+        if len(patient_proc_before) > 0:
+            feat['days_since_last_proc'] = (obs_time - patient_proc_before['timestamp'].max()).days
+            feat['proc_count_30d'] = len(patient_proc_before[patient_proc_before['timestamp'] > (obs_time - timedelta(days=30))])
+            feat['proc_count_365d'] = len(patient_proc_before[patient_proc_before['timestamp'] > (obs_time - timedelta(days=365))])
+            feat['proc_count_all_time'] = len(patient_proc_before)
+        else:
+            feat['days_since_last_proc'] = -1.0
+            feat['proc_count_30d'] = 0.0
+            feat['proc_count_365d'] = 0.0
+            feat['proc_count_all_time'] = 0.0
+        
+        # Seasonality
+        feat['month'] = obs_time.month / 12.0
+        feat['is_winter'] = 1.0 if obs_time.month in [12, 1, 2] else 0.0
+        feat['is_weekend'] = 1.0 if obs_time.weekday() >= 5 else 0.0
+        feat['day_of_week'] = obs_time.weekday() / 6.0
+        
+        # Normalize: days capped at 365, counts log-transformed
+        for col in ['days_since_last_ed', 'days_since_last_dx', 'days_since_last_proc']:
+            if feat[col] >= 0:
+                feat[col] = min(feat[col], 365) / 365.0
+            # else: keep -1.0 as sentinel
+        
+        for col in ['ed_count_all_time', 'dx_count_all_time', 'proc_count_all_time']:
+            feat[col] = np.log1p(feat[col])
+        
+        feat['age'] = feat['age'] / 100.0
+        
+        if not feature_names:
+            feature_names = list(feat.keys())
+        
+        feature_vector = torch.tensor(list(feat.values()), dtype=torch.float32)
+        feature_dict[idx] = feature_vector
+    
+    print(f"    ✓ Created {len(feature_dict)} time-aware feature vectors")
+    print(f"    Feature dimension: {len(feature_names)} features")
+    print(f"    Features: {feature_names[:10]}...")
+    
+    return feature_dict, feature_names
+
 
 def create_patient_features(data: Dict[str, pd.DataFrame], patient_ids: List[int]) -> pd.DataFrame:
     """

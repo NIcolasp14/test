@@ -20,7 +20,8 @@ from data_preprocessing import preprocess_pipeline
 from data_preprocessing_enhanced import (
     stratified_split_with_minimum_positives,
     create_enriched_labels_with_history,
-    create_patient_features
+    create_patient_features,
+    create_patient_features_time_aware
 )
 try:
     from feature_engineering import engineer_all_features
@@ -157,10 +158,57 @@ def run_feature_extraction(train_data, val_data, test_data):
         print("  Creating REAL patient features (not zero vectors)...")
         
         # Use the enhanced feature extraction
+        # CRITICAL: Use time-aware features if labels have observation_time (prevents leakage)
         try:
-            train_features = create_patient_features(train_data, train_data['patient_ids'])
-            val_features = create_patient_features(val_data, val_data['patient_ids'])
-            test_features = create_patient_features(test_data, test_data['patient_ids'])
+            # Check if labels have observation_time (enriched labels)
+            use_time_aware = 'observation_time' in train_labels.columns if hasattr(train_labels, 'columns') else False
+            
+            if use_time_aware:
+                print("  Using time-aware features (NO LEAKAGE - features computed per observation time)")
+                # Create time-aware features per label
+                train_feat_dict, feat_names = create_patient_features_time_aware(train_data, train_labels)
+                val_feat_dict, _ = create_patient_features_time_aware(val_data, val_labels)
+                test_feat_dict, _ = create_patient_features_time_aware(test_data, test_labels)
+                
+                # Aggregate to per-patient (use most recent observation_time's features)
+                # This maintains compatibility with graph construction while preventing leakage
+                def aggregate_to_patient(feat_dict, labels_df):
+                    patient_features = {}
+                    for patient_id in labels_df['patient_id'].unique():
+                        patient_labels = labels_df[labels_df['patient_id'] == patient_id].sort_values('observation_time')
+                        # Use most recent observation's features
+                        latest_idx = patient_labels.index[-1]
+                        if latest_idx in feat_dict:
+                            feat_tensor = feat_dict[latest_idx]
+                            # Convert tensor to numpy array for DataFrame
+                            if torch.is_tensor(feat_tensor):
+                                patient_features[patient_id] = feat_tensor.cpu().numpy()
+                            else:
+                                patient_features[patient_id] = feat_tensor
+                    return patient_features
+                
+                train_features_dict = aggregate_to_patient(train_feat_dict, train_labels)
+                val_features_dict = aggregate_to_patient(val_feat_dict, val_labels)
+                test_features_dict = aggregate_to_patient(test_feat_dict, test_labels)
+                
+                # Convert to DataFrame for compatibility
+                # Create DataFrame with patient_id as index
+                train_features = pd.DataFrame.from_dict(train_features_dict, orient='index')
+                val_features = pd.DataFrame.from_dict(val_features_dict, orient='index')
+                test_features = pd.DataFrame.from_dict(test_features_dict, orient='index')
+                
+                # Rename columns to feature names if available
+                if feat_names and len(feat_names) == train_features.shape[1]:
+                    train_features.columns = feat_names
+                    val_features.columns = feat_names
+                    test_features.columns = feat_names
+                
+                print(f"    Aggregated to {len(train_features)} patients (using latest observation_time per patient)")
+            else:
+                print("  Using static features (one per patient)")
+                train_features = create_patient_features(train_data, train_data['patient_ids'])
+                val_features = create_patient_features(val_data, val_data['patient_ids'])
+                test_features = create_patient_features(test_data, test_data['patient_ids'])
             
             features = {
                 'train': train_features,
