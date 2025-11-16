@@ -178,11 +178,28 @@ def run_feature_extraction(train_data, val_data, test_data):
             # Convert DataFrames to dict-of-tensors format expected by graph builder
             print("\n  Converting features to tensor format for graph construction...")
             
-            def df_to_feature_dict(df):
-                """Convert DataFrame to {patient_id: tensor} dict"""
+            # Get actual feature dimension from the DataFrame
+            actual_feat_dim = train_features.shape[1]
+            print(f"    Actual feature dimension: {actual_feat_dim}")
+            print(f"    Target dimension (PROJECTED_DIM): {config.PROJECTED_DIM}")
+            
+            def df_to_feature_dict(df, target_dim=config.PROJECTED_DIM):
+                """Convert DataFrame to {patient_id: tensor} dict with padding/truncation"""
                 feature_dict = {}
                 for patient_id in df.index:
-                    feature_dict[patient_id] = torch.tensor(df.loc[patient_id].values, dtype=torch.float32)
+                    feat_values = df.loc[patient_id].values
+                    feat_tensor = torch.tensor(feat_values, dtype=torch.float32)
+                    
+                    # Pad or truncate to target dimension
+                    if len(feat_tensor) < target_dim:
+                        # Pad with zeros
+                        padding = torch.zeros(target_dim - len(feat_tensor))
+                        feat_tensor = torch.cat([feat_tensor, padding])
+                    elif len(feat_tensor) > target_dim:
+                        # Truncate (shouldn't happen but handle it)
+                        feat_tensor = feat_tensor[:target_dim]
+                    
+                    feature_dict[patient_id] = feat_tensor
                 return feature_dict
             
             features_for_graph = {

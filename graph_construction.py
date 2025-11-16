@@ -409,13 +409,22 @@ class HeteroGraphBuilder:
         patient_feat_list = []
         patient_feat_key = f'{split_name}_patient_features'
         
+        # Determine feature dimension from first available patient
+        target_feat_dim = config.PROJECTED_DIM
+        if self.features and patient_feat_key in self.features:
+            sample_feats = self.features[patient_feat_key]
+            if sample_feats:
+                first_feat = next(iter(sample_feats.values()))
+                if first_feat is not None and hasattr(first_feat, '__len__'):
+                    target_feat_dim = len(first_feat)
+        
         for pid in patient_ids:
             feat = None
             if self.features and patient_feat_key in self.features:
                 feat = self.features[patient_feat_key].get(pid)
             
             if feat is None:
-                feat = torch.zeros(config.PROJECTED_DIM)
+                feat = torch.zeros(target_feat_dim)
             patient_feat_list.append(feat)
         
         node_features['patient'] = torch.stack(patient_feat_list)
