@@ -200,6 +200,13 @@ def create_enriched_labels_with_history(data: Dict[str, pd.DataFrame],
     """
     print(f"\n  Creating enriched labels for {split_name} split...")
     
+    # Check if timestamp column exists, if not, the data hasn't been preprocessed yet
+    if 'timestamp' not in data['nyu_edu'].columns:
+        print(f"  ⚠️  Data doesn't have 'timestamp' column yet - using original preprocessing labels")
+        # Fall back to original create_labels function
+        from data_preprocessing import create_labels
+        return create_labels(data, split_name)
+    
     ed_visits = data['nyu_edu'].sort_values(['sys_mbr_sk', 'timestamp'])
     diagnosis = data['diagnosis'].sort_values(['clm_sys_mbr_sk', 'timestamp'])
     procedures = data['procedures'].sort_values(['sys_mbr_sk', 'timestamp'])
@@ -402,10 +409,10 @@ def stratified_split_with_minimum_positives(data: Dict[str, pd.DataFrame],
         """Create split data dictionary"""
         split = {}
         split['patient_ids'] = patient_list
-        split['demographics'] = data['demographics'][data['demographics']['sys_mbr_sk'].isin(patient_list)]
-        split['nyu_edu'] = data['nyu_edu'][data['nyu_edu']['sys_mbr_sk'].isin(patient_list)]
-        split['diagnosis'] = data['diagnosis'][data['diagnosis']['clm_sys_mbr_sk'].isin(patient_list)]
-        split['procedures'] = data['procedures'][data['procedures']['sys_mbr_sk'].isin(patient_list)]
+        split['demographics'] = data['demographics'][data['demographics']['sys_mbr_sk'].isin(patient_list)].copy()
+        split['nyu_edu'] = data['nyu_edu'][data['nyu_edu']['sys_mbr_sk'].isin(patient_list)].copy()
+        split['diagnosis'] = data['diagnosis'][data['diagnosis']['clm_sys_mbr_sk'].isin(patient_list)].copy()
+        split['procedures'] = data['procedures'][data['procedures']['sys_mbr_sk'].isin(patient_list)].copy()
         if 'sdoh' in data:
             # Match by EMPI if available
             if 'empi' in data['demographics'].columns:

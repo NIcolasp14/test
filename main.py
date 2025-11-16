@@ -98,8 +98,13 @@ def run_preprocessing():
             print("="*80)
             
             # Load raw data
-            from data_preprocessing import load_raw_data
+            from data_preprocessing import load_raw_data, preprocess_data, create_timestamps, standardize_column_names
             data = load_raw_data()
+            
+            # Preprocess data: add timestamps
+            print("\n  Preprocessing data (adding timestamps)...")
+            data = standardize_column_names(data)
+            data = create_timestamps(data)
             
             # Create stratified patient-level splits
             train_data, val_data, test_data = stratified_split_with_minimum_positives(
