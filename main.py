@@ -98,7 +98,7 @@ def run_preprocessing():
             print("="*80)
             
             # Load raw data
-            from data_preprocessing import load_raw_data, preprocess_data, create_timestamps, standardize_column_names
+            from data_preprocessing import load_raw_data, create_timestamps, standardize_column_names
             data = load_raw_data()
             
             # Preprocess data: add timestamps
@@ -143,9 +143,13 @@ def run_feature_extraction(train_data, val_data, test_data):
         with open(output_dir / 'features.pkl', 'rb') as f:
             features = pickle.load(f)
         
-        # Diagnostic: show feature dimensions
-        if features.get('train') is not None and hasattr(features['train'], 'shape'):
-            print(f"  Feature dimensions: {features['train'].shape}")
+        # Diagnostic: show feature info
+        if 'train_patient_features' in features:
+            n_patients = len(features['train_patient_features'])
+            if n_patients > 0:
+                sample_feat = next(iter(features['train_patient_features'].values()))
+                feat_dim = len(sample_feat) if hasattr(sample_feat, '__len__') else sample_feat.shape[0]
+                print(f"  Train: {n_patients} patients × {feat_dim} features")
         
         return features
     else:
@@ -171,22 +175,45 @@ def run_feature_extraction(train_data, val_data, test_data):
             print(f"    Test:  {test_features.shape[0]} patients × {test_features.shape[1]} features")
             print(f"    Top features: {list(train_features.columns[:10])}")
             
-            # Save features
+            # Convert DataFrames to dict-of-tensors format expected by graph builder
+            print("\n  Converting features to tensor format for graph construction...")
+            
+            def df_to_feature_dict(df):
+                """Convert DataFrame to {patient_id: tensor} dict"""
+                feature_dict = {}
+                for patient_id in df.index:
+                    feature_dict[patient_id] = torch.tensor(df.loc[patient_id].values, dtype=torch.float32)
+                return feature_dict
+            
+            features_for_graph = {
+                'train_patient_features': df_to_feature_dict(train_features),
+                'val_patient_features': df_to_feature_dict(val_features),
+                'test_patient_features': df_to_feature_dict(test_features),
+                # Note: code_embeddings, provider_embeddings, etc. would come from LLM embeddings
+                # For now, graph builder will use zero vectors for those (which is fine)
+            }
+            
+            # Save both formats
             output_dir.mkdir(exist_ok=True)
             with open(output_dir / 'features.pkl', 'wb') as f:
+                pickle.dump(features_for_graph, f)
+            
+            # Also save original DataFrames for later analysis
+            with open(output_dir / 'features_df.pkl', 'wb') as f:
                 pickle.dump(features, f)
             
-            return features
+            return features_for_graph
         except Exception as e:
             print(f"  ⚠️  Error in feature engineering: {e}")
             print(f"  Falling back to basic features...")
             
-            # Fallback: return empty features (graphs will still work)
-            print("  Using basic graph features only...")
+            # Fallback: return empty features dict (graph builder will use zeros)
+            print("  Using zero-initialized features (no extracted features available)...")
             features = {
-                'train': None,
-                'val': None,
-                'test': None
+                # Empty dicts - graph builder will create zero vectors
+                'train_patient_features': {},
+                'val_patient_features': {},
+                'test_patient_features': {},
             }
             
             # Save empty features

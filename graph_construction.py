@@ -94,43 +94,99 @@ class HeteroGraphBuilder:
             self.reverse_node_maps[split_name]['hospital'][idx] = hospital
         node_counts['hospital'] = len(hospitals)
         
-        # Visit nodes - COLLAPSED by (patient, date) to fix "visit explosion" problem
+        # Visit nodes - COLLAPSED by (patient, date) WITH complexity features
         # Old approach: 1.8M visit nodes (one per diagnosis/procedure/ED row)
-        # New approach: ONE visit per unique (patient, date) combination
-        print(f"  Collapsing visits by (patient, date)...")
+        # New approach: ONE visit per unique (patient, date) WITH aggregate features
+        print(f"  Collapsing visits by (patient, date) and computing visit features...")
         
-        # Collect all unique (patient, date) pairs
-        visit_keys = set()
+        # Collect visit-level data with features
+        visit_data = defaultdict(lambda: {
+            'diagnoses': [],
+            'procedures': [],
+            'is_ed': False,
+            'timestamp': None
+        })
         
+        # Aggregate diagnoses by visit
         for _, row in split_data['diagnosis'].iterrows():
             patient_id = row['clm_sys_mbr_sk']
             date = row['timestamp'].date() if pd.notna(row['timestamp']) else None
             if date is not None:
-                visit_keys.add((patient_id, date))
+                visit_key = (patient_id, date)
+                visit_data[visit_key]['diagnoses'].append(row['icd9_diagnosis_cd'])
+                if visit_data[visit_key]['timestamp'] is None:
+                    visit_data[visit_key]['timestamp'] = row['timestamp']
         
+        # Aggregate procedures by visit
         for _, row in split_data['procedures'].iterrows():
             patient_id = row['sys_mbr_sk']
             date = row['timestamp'].date() if pd.notna(row['timestamp']) else None
             if date is not None:
-                visit_keys.add((patient_id, date))
+                visit_key = (patient_id, date)
+                visit_data[visit_key]['procedures'].append(row['cpt_cd'])
+                if visit_data[visit_key]['timestamp'] is None:
+                    visit_data[visit_key]['timestamp'] = row['timestamp']
         
+        # Mark ED visits
         for _, row in split_data['nyu_edu'].iterrows():
             patient_id = row['sys_mbr_sk']
             date = row['timestamp'].date() if pd.notna(row['timestamp']) else None
             if date is not None:
-                visit_keys.add((patient_id, date))
+                visit_key = (patient_id, date)
+                visit_data[visit_key]['is_ed'] = True
+                if visit_data[visit_key]['timestamp'] is None:
+                    visit_data[visit_key]['timestamp'] = row['timestamp']
         
-        # Create visit IDs
+        # Create visit IDs and feature vectors
         visit_map = {}
-        for idx, visit_key in enumerate(sorted(visit_keys)):
+        visit_features_list = []
+        
+        for idx, (visit_key, data) in enumerate(sorted(visit_data.items())):
             visit_id = f"visit_{visit_key[0]}_{visit_key[1]}"
             visit_map[visit_id] = idx
+            
+            # Compute visit complexity features
+            num_diagnoses = len(data['diagnoses'])
+            num_procedures = len(data['procedures'])
+            is_ed = 1.0 if data['is_ed'] else 0.0
+            
+            # Diagnosis diversity: count unique ICD chapters (first 3 chars)
+            unique_chapters = len(set(str(dx)[:3] for dx in data['diagnoses'])) if data['diagnoses'] else 0
+            
+            # Has chronic diagnosis (simplified: look for common chronic ICD prefixes)
+            chronic_prefixes = ['250', '401', '272', '414', '428', '496', '585']  # Diabetes, HTN, lipid, CAD, CHF, COPD, CKD
+            has_chronic = 1.0 if any(any(str(dx).startswith(prefix) for prefix in chronic_prefixes) for dx in data['diagnoses']) else 0.0
+            
+            # Total codes (procedure + diagnosis complexity)
+            total_codes = num_diagnoses + num_procedures
+            
+            # Create feature vector: [num_dx, num_proc, is_ed, dx_diversity, has_chronic, total_codes]
+            visit_features_list.append([
+                float(num_diagnoses),
+                float(num_procedures),
+                is_ed,
+                float(unique_chapters),
+                has_chronic,
+                float(total_codes)
+            ])
         
         visit_counter = len(visit_map)
         node_counts['visit'] = visit_counter
         
         print(f"    Before: {len(split_data['diagnosis']) + len(split_data['procedures']) + len(split_data['nyu_edu'])} rows")
         print(f"    After:  {visit_counter} unique visits (reduced by {100*(1-visit_counter/(len(split_data['diagnosis']) + len(split_data['procedures']) + len(split_data['nyu_edu']) + 1)):.1f}%)")
+        print(f"    Visit features: 6 dimensions (num_dx, num_proc, is_ed, dx_diversity, has_chronic, total_codes)")
+        
+        # Show visit complexity statistics
+        if visit_features_list:
+            features_array = np.array(visit_features_list)
+            print(f"\n    📊 Visit Complexity Statistics:")
+            print(f"       Avg diagnoses per visit: {features_array[:, 0].mean():.1f}")
+            print(f"       Avg procedures per visit: {features_array[:, 1].mean():.1f}")
+            print(f"       % ED visits: {features_array[:, 2].mean()*100:.1f}%")
+            print(f"       Avg diagnosis diversity: {features_array[:, 3].mean():.1f} ICD chapters")
+            print(f"       % with chronic diagnosis: {features_array[:, 4].mean()*100:.1f}%")
+            print(f"       Avg total codes: {features_array[:, 5].mean():.1f}")
         
         # SDOH nodes (one per patient)
         sdoh_counter = 0
@@ -430,8 +486,20 @@ class HeteroGraphBuilder:
         
         node_features['hospital'] = torch.stack(hospital_feat_list)
         
-        # Visit features (aggregate from connected nodes - simple zero init for now)
-        node_features['visit'] = torch.zeros((node_counts['visit'], config.PROJECTED_DIM))
+        # Visit features - USE REAL COMPLEXITY FEATURES computed during collapsing
+        # Features: [num_dx, num_proc, is_ed, dx_diversity, has_chronic, total_codes]
+        if visit_features_list:
+            visit_features_tensor = torch.tensor(visit_features_list, dtype=torch.float32)
+            # Pad to PROJECTED_DIM if needed
+            if visit_features_tensor.shape[1] < config.PROJECTED_DIM:
+                padding = torch.zeros((visit_features_tensor.shape[0], config.PROJECTED_DIM - visit_features_tensor.shape[1]))
+                visit_features_tensor = torch.cat([visit_features_tensor, padding], dim=1)
+            elif visit_features_tensor.shape[1] > config.PROJECTED_DIM:
+                visit_features_tensor = visit_features_tensor[:, :config.PROJECTED_DIM]
+            node_features['visit'] = visit_features_tensor
+        else:
+            # Fallback if no visits
+            node_features['visit'] = torch.zeros((node_counts['visit'], config.PROJECTED_DIM))
         
         # SDOH features (simple zero init for now)
         node_features['sdoh'] = torch.zeros((node_counts['sdoh'], config.PROJECTED_DIM))
