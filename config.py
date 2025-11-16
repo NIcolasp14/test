@@ -14,6 +14,13 @@ MODEL_SAVE_DIR = "models"
 RESULTS_DIR = "results"
 
 # ============================================================================
+# DATA PREPROCESSING STRATEGY
+# ============================================================================
+FORCE_REPROCESS = True           # Force reprocessing even if cached data exists
+USE_ENHANCED_PREPROCESSING = True  # Use enhanced preprocessing with balanced splits
+MIN_POSITIVES_PER_SPLIT = 300    # Minimum positive samples per split
+
+# ============================================================================
 # EVALUATION STRATEGY
 # ============================================================================
 USE_CROSS_VALIDATION = True   # Use k-fold CV instead of temporal split
@@ -111,14 +118,14 @@ LEARNING_RATE = 3e-4  # Decreased from 1e-3 for stability
 WEIGHT_DECAY = 5e-3  # Increased from 1e-4 for regularization
 GRAD_CLIP = 1.0
 
-# Loss weights (adjusted for class imbalance and poor regression performance)
-LAMBDA_BCE = 5.0          # Weight for binary classification loss (INCREASED - focus on classification with severe imbalance)
-LAMBDA_MAE = 0.1          # Weight for MAE loss (DECREASED - regression not working well with 82% censored data)
+# Loss weights (HEAVILY adjusted for class imbalance - BINARY CLASSIFICATION IS PRIMARY TASK)
+LAMBDA_BCE = 10.0         # Weight for binary classification loss (MASSIVELY INCREASED - this is what matters!)
+LAMBDA_MAE = 0.01         # Weight for MAE loss (MINIMIZED - regression unreliable with sparse labels)
 
-# Focal Loss for extreme class imbalance (better than weighted BCE for 5.4% positive class)
-USE_FOCAL_LOSS = True     # Use focal loss instead of weighted BCE
-FOCAL_ALPHA = 0.25        # Weight for positive class (0.25 for rare class)
-FOCAL_GAMMA = 2.0         # Focusing parameter (2.0 standard, higher = more focus on hard examples)
+# Focal Loss for extreme class imbalance (CRITICAL for <5% positive rate)
+USE_FOCAL_LOSS = True     # Use focal loss instead of weighted BCE  
+FOCAL_ALPHA = 0.1         # Weight for positive class (lowered to 0.1 for very rare class ~2-5%)
+FOCAL_GAMMA = 3.0         # Focusing parameter (INCREASED to 3.0 for harder focusing on mistakes)
 
 # Optimizer
 OPTIMIZER = "adamw"       # Options: "adam", "adamw", "sgd"

@@ -94,30 +94,43 @@ class HeteroGraphBuilder:
             self.reverse_node_maps[split_name]['hospital'][idx] = hospital
         node_counts['hospital'] = len(hospitals)
         
-        # Visit nodes (one per ED visit + implicit visits from dx/proc)
-        visit_counter = 0
-        visit_map = {}
+        # Visit nodes - COLLAPSED by (patient, date) to fix "visit explosion" problem
+        # Old approach: 1.8M visit nodes (one per diagnosis/procedure/ED row)
+        # New approach: ONE visit per unique (patient, date) combination
+        print(f"  Collapsing visits by (patient, date)...")
         
-        # Create unique visit IDs for each event
+        # Collect all unique (patient, date) pairs
+        visit_keys = set()
+        
         for _, row in split_data['diagnosis'].iterrows():
-            visit_id = f"visit_dx_{row.name}_{row['clm_sys_mbr_sk']}_{row['timestamp']}"
-            if visit_id not in visit_map:
-                visit_map[visit_id] = visit_counter
-                visit_counter += 1
+            patient_id = row['clm_sys_mbr_sk']
+            date = row['timestamp'].date() if pd.notna(row['timestamp']) else None
+            if date is not None:
+                visit_keys.add((patient_id, date))
         
         for _, row in split_data['procedures'].iterrows():
-            visit_id = f"visit_proc_{row.name}_{row['sys_mbr_sk']}_{row['timestamp']}"
-            if visit_id not in visit_map:
-                visit_map[visit_id] = visit_counter
-                visit_counter += 1
+            patient_id = row['sys_mbr_sk']
+            date = row['timestamp'].date() if pd.notna(row['timestamp']) else None
+            if date is not None:
+                visit_keys.add((patient_id, date))
         
         for _, row in split_data['nyu_edu'].iterrows():
-            visit_id = f"visit_ed_{row.name}_{row['sys_mbr_sk']}_{row['timestamp']}"
-            if visit_id not in visit_map:
-                visit_map[visit_id] = visit_counter
-                visit_counter += 1
+            patient_id = row['sys_mbr_sk']
+            date = row['timestamp'].date() if pd.notna(row['timestamp']) else None
+            if date is not None:
+                visit_keys.add((patient_id, date))
         
+        # Create visit IDs
+        visit_map = {}
+        for idx, visit_key in enumerate(sorted(visit_keys)):
+            visit_id = f"visit_{visit_key[0]}_{visit_key[1]}"
+            visit_map[visit_id] = idx
+        
+        visit_counter = len(visit_map)
         node_counts['visit'] = visit_counter
+        
+        print(f"    Before: {len(split_data['diagnosis']) + len(split_data['procedures']) + len(split_data['nyu_edu'])} rows")
+        print(f"    After:  {visit_counter} unique visits (reduced by {100*(1-visit_counter/(len(split_data['diagnosis']) + len(split_data['procedures']) + len(split_data['nyu_edu']) + 1)):.1f}%)")
         
         # SDOH nodes (one per patient)
         sdoh_counter = 0
@@ -136,47 +149,69 @@ class HeteroGraphBuilder:
         # (patient)-[has_visit]->(visit)
         has_visit_src, has_visit_dst, has_visit_ts = [], [], []
         
-        # From diagnoses
+        # Create (patient)-[has_visit]->(visit) edges using collapsed visit IDs
+        # Only create one edge per unique (patient, date) pair
+        seen_edges = set()
+        
         for _, row in split_data['diagnosis'].iterrows():
             patient_id = row['clm_sys_mbr_sk']
-            if patient_id not in self.node_id_maps[split_name]['patient']:
+            date = row['timestamp'].date() if pd.notna(row['timestamp']) else None
+            if date is None or patient_id not in self.node_id_maps[split_name]['patient']:
                 continue
             
-            visit_id = f"visit_dx_{row.name}_{patient_id}_{row['timestamp']}"
+            visit_id = f"visit_{patient_id}_{date}"
+            edge_key = (patient_id, visit_id)
+            
+            if edge_key in seen_edges or visit_id not in visit_map:
+                continue
+            
             patient_nid = self.node_id_maps[split_name]['patient'][patient_id]
             visit_nid = visit_map[visit_id]
             
             has_visit_src.append(patient_nid)
             has_visit_dst.append(visit_nid)
             has_visit_ts.append(row['timestamp'].timestamp())
+            seen_edges.add(edge_key)
         
-        # From procedures
         for _, row in split_data['procedures'].iterrows():
             patient_id = row['sys_mbr_sk']
-            if patient_id not in self.node_id_maps[split_name]['patient']:
+            date = row['timestamp'].date() if pd.notna(row['timestamp']) else None
+            if date is None or patient_id not in self.node_id_maps[split_name]['patient']:
                 continue
             
-            visit_id = f"visit_proc_{row.name}_{patient_id}_{row['timestamp']}"
+            visit_id = f"visit_{patient_id}_{date}"
+            edge_key = (patient_id, visit_id)
+            
+            if edge_key in seen_edges or visit_id not in visit_map:
+                continue
+            
             patient_nid = self.node_id_maps[split_name]['patient'][patient_id]
             visit_nid = visit_map[visit_id]
             
             has_visit_src.append(patient_nid)
             has_visit_dst.append(visit_nid)
             has_visit_ts.append(row['timestamp'].timestamp())
+            seen_edges.add(edge_key)
         
-        # From ED visits
         for _, row in split_data['nyu_edu'].iterrows():
             patient_id = row['sys_mbr_sk']
-            if patient_id not in self.node_id_maps[split_name]['patient']:
+            date = row['timestamp'].date() if pd.notna(row['timestamp']) else None
+            if date is None or patient_id not in self.node_id_maps[split_name]['patient']:
                 continue
             
-            visit_id = f"visit_ed_{row.name}_{patient_id}_{row['timestamp']}"
+            visit_id = f"visit_{patient_id}_{date}"
+            edge_key = (patient_id, visit_id)
+            
+            if edge_key in seen_edges or visit_id not in visit_map:
+                continue
+            
             patient_nid = self.node_id_maps[split_name]['patient'][patient_id]
             visit_nid = visit_map[visit_id]
             
             has_visit_src.append(patient_nid)
             has_visit_dst.append(visit_nid)
             has_visit_ts.append(row['timestamp'].timestamp())
+            seen_edges.add(edge_key)
         
         edge_dict[('patient', 'has_visit', 'visit')] = (
             torch.tensor(has_visit_src, dtype=torch.long),
@@ -184,19 +219,24 @@ class HeteroGraphBuilder:
         )
         edge_timestamps[('patient', 'has_visit', 'visit')] = torch.tensor(has_visit_ts, dtype=torch.float32)
         
-        # (visit)-[has_diagnosis]->(dx_code)
+        # (visit)-[has_diagnosis]->(dx_code) - using collapsed visit IDs
         has_diag_src, has_diag_dst = [], []
         for _, row in split_data['diagnosis'].iterrows():
             patient_id = row['clm_sys_mbr_sk']
-            if patient_id not in self.node_id_maps[split_name]['patient']:
+            date = row['timestamp'].date() if pd.notna(row['timestamp']) else None
+            if date is None or patient_id not in self.node_id_maps[split_name]['patient']:
                 continue
             
-            visit_id = f"visit_dx_{row.name}_{patient_id}_{row['timestamp']}"
+            visit_id = f"visit_{patient_id}_{date}"
+            if visit_id not in visit_map:
+                continue
             visit_nid = visit_map[visit_id]
             
             dx_code = f"ICD_{row['icd9_diagnosis_cd']}"
             if dx_code not in self.node_id_maps[split_name]['dx_code']:
                 dx_code = config.UNK_TOKEN
+            if dx_code not in self.node_id_maps[split_name]['dx_code']:
+                continue
             dx_nid = self.node_id_maps[split_name]['dx_code'][dx_code]
             
             has_diag_src.append(visit_nid)
@@ -207,19 +247,24 @@ class HeteroGraphBuilder:
             torch.tensor(has_diag_dst, dtype=torch.long)
         )
         
-        # (visit)-[has_procedure]->(proc_code)
+        # (visit)-[has_procedure]->(proc_code) - using collapsed visit IDs
         has_proc_src, has_proc_dst = [], []
         for _, row in split_data['procedures'].iterrows():
             patient_id = row['sys_mbr_sk']
-            if patient_id not in self.node_id_maps[split_name]['patient']:
+            date = row['timestamp'].date() if pd.notna(row['timestamp']) else None
+            if date is None or patient_id not in self.node_id_maps[split_name]['patient']:
                 continue
             
-            visit_id = f"visit_proc_{row.name}_{patient_id}_{row['timestamp']}"
+            visit_id = f"visit_{patient_id}_{date}"
+            if visit_id not in visit_map:
+                continue
             visit_nid = visit_map[visit_id]
             
             proc_code = f"CPT_{row['cpt_cd']}"
             if proc_code not in self.node_id_maps[split_name]['proc_code']:
                 proc_code = config.UNK_TOKEN
+            if proc_code not in self.node_id_maps[split_name]['proc_code']:
+                continue
             proc_nid = self.node_id_maps[split_name]['proc_code'][proc_code]
             
             has_proc_src.append(visit_nid)
@@ -252,27 +297,18 @@ class HeteroGraphBuilder:
                 torch.tensor(performed_dst, dtype=torch.long)
             )
         
-        # (provider)-[works_at]->(hospital)
-        works_src, works_dst = [], []
-        for _, row in split_data['nyu_edu'].iterrows():
-            # Simplified: connect billing provider (as hospital) - in real data, map providers to hospitals
-            hospital = row['billing_provider_name']
-            if pd.isna(hospital) or hospital not in self.node_id_maps[split_name]['hospital']:
-                hospital = config.UNK_TOKEN
-            hospital_nid = self.node_id_maps[split_name]['hospital'][hospital]
-            
-            # For simplicity, create dummy provider->hospital edges
-            # In real implementation, you'd have actual provider-hospital mappings
-            for provider in list(self.node_id_maps[split_name]['provider'].keys())[:5]:
-                provider_nid = self.node_id_maps[split_name]['provider'][provider]
-                works_src.append(provider_nid)
-                works_dst.append(hospital_nid)
-        
-        if works_src:
-            edge_dict[('provider', 'works_at', 'hospital')] = (
-                torch.tensor(works_src, dtype=torch.long),
-                torch.tensor(works_dst, dtype=torch.long)
-            )
+        # (provider)-[works_at]->(hospital) - DISABLED
+        # REASON: The previous implementation created DUMMY/RANDOM edges that added noise.
+        # It connected the first 5 providers to every hospital, which is not real data.
+        # This prevents the model from learning meaningful patterns.
+        # 
+        # TO RE-ENABLE: You need a real provider-to-hospital mapping table.
+        # Until then, it's better to have NO edges than WRONG edges.
+        #
+        # works_src, works_dst = [], []
+        # ... (dummy edge creation code removed)
+        #
+        print(f"  ⚠️  Skipping provider→hospital edges (no real mapping available)")
         
         # (patient)-[has_sdoh]->(sdoh) - static edges
         has_sdoh_src, has_sdoh_dst = [], []

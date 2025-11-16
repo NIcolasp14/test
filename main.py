@@ -10,12 +10,18 @@ from pathlib import Path
 import pickle
 import pandas as pd
 from datetime import datetime
+from collections import defaultdict
 import warnings
 warnings.filterwarnings('ignore')
 
 # Import pipeline modules
 import config
 from data_preprocessing import preprocess_pipeline
+from data_preprocessing_enhanced import (
+    stratified_split_with_minimum_positives,
+    create_enriched_labels_with_history,
+    create_patient_features
+)
 try:
     from feature_engineering import engineer_all_features
     HAS_FEATURE_ENGINEERING = True
@@ -44,11 +50,12 @@ def setup_directories():
 
 
 def run_preprocessing():
-    """Run data preprocessing if needed"""
+    """Run data preprocessing with enhanced stratified splitting"""
     output_dir = Path(config.OUTPUT_DIR)
     
     # Check for force reprocess flag
     force_reprocess = getattr(config, 'FORCE_REPROCESS', False)
+    use_enhanced = getattr(config, 'USE_ENHANCED_PREPROCESSING', True)
     
     if (output_dir / 'train_data.pkl').exists() and not force_reprocess:
         print("✓ Preprocessed data found, loading...")
@@ -61,90 +68,128 @@ def run_preprocessing():
         
         # CRITICAL DIAGNOSTICS - Show what was loaded
         print("\n  📊 LOADED DATA SUMMARY:")
-        print(f"    Train: {len(train_data['nyu_edu'])} ED visits, {len(train_labels)} patients")
-        print(f"    Val:   {len(val_data['nyu_edu'])} ED visits, {len(val_labels)} patients")
-        print(f"    Test:  {len(test_data['nyu_edu'])} ED visits, {len(test_labels)} patients")
+        print(f"    Train: {len(train_data['nyu_edu'])} ED visits, {len(train_labels)} samples")
+        print(f"    Val:   {len(val_data['nyu_edu'])} ED visits, {len(val_labels)} samples")
+        print(f"    Test:  {len(test_data['nyu_edu'])} ED visits, {len(test_labels)} samples")
         
         # Check for data quality issues
-        train_uncensored = (train_labels['days_to_next_ed'] >= 0).sum()
-        val_uncensored = (val_labels['days_to_next_ed'] >= 0).sum()
+        train_positives = train_labels['has_next_ed_30d'].sum()
+        val_positives = val_labels['has_next_ed_30d'].sum()
         
         print(f"\n    Label distribution:")
-        print(f"    Train: {train_uncensored}/{len(train_labels)} uncensored samples")
-        print(f"    Val:   {val_uncensored}/{len(val_labels)} uncensored samples")
+        print(f"    Train: {train_positives}/{len(train_labels)} positive samples ({100*train_positives/len(train_labels):.1f}%)")
+        print(f"    Val:   {val_positives}/{len(val_labels)} positive samples ({100*val_positives/len(val_labels):.1f}%)")
         
-        if train_uncensored == 0:
-            print("\n    ⚠️  CRITICAL WARNING: NO UNCENSORED TRAINING SAMPLES!")
-            print("    ⚠️  Model cannot learn without ED visit outcomes.")
-            print("    ⚠️  This usually means:")
-            print("        - Column names in data don't match expectations")
-            print("        - Time cutoffs exclude all ED visits")
-            print("        - Data was cached before fixes were applied")
-            print("\n    💡 SOLUTION: Delete the outputs/ folder and rerun:")
-            print("       rm -rf outputs/  # or rmdir /s outputs on Windows")
-            print("       python main.py")
-            print("\n    Or set FORCE_REPROCESS = True in config.py")
+        if train_positives < 100:
+            print("\n    ⚠️⚠️⚠️  CRITICAL WARNING: VERY FEW POSITIVE TRAINING SAMPLES!")
+            print(f"    ⚠️  Only {train_positives} ED-within-30d samples found!")
+            print("    ⚠️  Model likely to collapse to 'always negative' solution.")
+            print("\n    💡 SOLUTION: Set FORCE_REPROCESS = True in config.py")
+            print("       This will use enhanced preprocessing with balanced splits.")
         
         return train_data, val_data, test_data, train_labels, val_labels, test_labels
     else:
         if force_reprocess:
             print("🔄 Force reprocessing data (FORCE_REPROCESS=True)...")
+        
+        if use_enhanced:
+            print("\n" + "="*80)
+            print("USING ENHANCED PREPROCESSING WITH BALANCED SPLITS")
+            print("="*80)
+            
+            # Load raw data
+            from data_preprocessing import load_raw_data
+            data = load_raw_data()
+            
+            # Create stratified patient-level splits
+            train_data, val_data, test_data = stratified_split_with_minimum_positives(
+                data, min_positives_per_split=300
+            )
+            
+            # Create enriched labels with historical observation points
+            train_labels = create_enriched_labels_with_history(train_data, train_data['patient_ids'], 'train')
+            val_labels = create_enriched_labels_with_history(val_data, val_data['patient_ids'], 'val')
+            test_labels = create_enriched_labels_with_history(test_data, test_data['patient_ids'], 'test')
+            
+            # Save processed data
+            output_dir.mkdir(exist_ok=True)
+            with open(output_dir / 'train_data.pkl', 'wb') as f:
+                pickle.dump((train_data, train_labels), f)
+            with open(output_dir / 'val_data.pkl', 'wb') as f:
+                pickle.dump((val_data, val_labels), f)
+            with open(output_dir / 'test_data.pkl', 'wb') as f:
+                pickle.dump((test_data, test_labels), f)
+            
+            print("\n✓ Enhanced preprocessing complete")
+            
+            return train_data, val_data, test_data, train_labels, val_labels, test_labels
         else:
-            print("Running preprocessing pipeline...")
-        return preprocess_pipeline()
+            print("Using original preprocessing pipeline...")
+            return preprocess_pipeline()
 
 
 def run_feature_extraction(train_data, val_data, test_data):
-    """Run feature extraction if needed"""
+    """Run feature extraction with real patient features"""
     output_dir = Path(config.OUTPUT_DIR)
+    force_reprocess = getattr(config, 'FORCE_REPROCESS', False)
     
-    if (output_dir / 'features.pkl').exists():
+    if (output_dir / 'features.pkl').exists() and not force_reprocess:
         print("\n✓ Features found, loading...")
         with open(output_dir / 'features.pkl', 'rb') as f:
             features = pickle.load(f)
+        
+        # Diagnostic: show feature dimensions
+        if features.get('train') is not None and hasattr(features['train'], 'shape'):
+            print(f"  Feature dimensions: {features['train'].shape}")
+        
         return features
     else:
         print("\nRunning feature extraction pipeline...")
+        print("  Creating REAL patient features (not zero vectors)...")
         
-        if HAS_FEATURE_ENGINEERING:
-            # Use engineered features
-            print("  Using engineered temporal features...")
-            try:
-                # Engineer features from train data
-                train_features = engineer_all_features(train_data)
-                val_features = engineer_all_features(val_data)
-                test_features = engineer_all_features(test_data)
-                
-                features = {
-                    'train': train_features,
-                    'val': val_features,
-                    'test': test_features
-                }
-                
-                # Save features
-                output_dir.mkdir(exist_ok=True)
-                with open(output_dir / 'features.pkl', 'wb') as f:
-                    pickle.dump(features, f)
-                
-                return features
-            except Exception as e:
-                print(f"  ⚠️  Error in feature engineering: {e}")
-                print(f"  Falling back to basic features...")
-        
-        # Fallback: return empty features (graphs will still work)
-        print("  Using basic graph features only...")
-        features = {
-            'train': None,
-            'val': None,
-            'test': None
-        }
-        
-        # Save empty features
-        output_dir.mkdir(exist_ok=True)
-        with open(output_dir / 'features.pkl', 'wb') as f:
-            pickle.dump(features, f)
-        
-        return features
+        # Use the enhanced feature extraction
+        try:
+            train_features = create_patient_features(train_data, train_data['patient_ids'])
+            val_features = create_patient_features(val_data, val_data['patient_ids'])
+            test_features = create_patient_features(test_data, test_data['patient_ids'])
+            
+            features = {
+                'train': train_features,
+                'val': val_features,
+                'test': test_features
+            }
+            
+            # Show feature summary
+            print(f"\n  ✓ Feature extraction complete:")
+            print(f"    Train: {train_features.shape[0]} patients × {train_features.shape[1]} features")
+            print(f"    Val:   {val_features.shape[0]} patients × {val_features.shape[1]} features")
+            print(f"    Test:  {test_features.shape[0]} patients × {test_features.shape[1]} features")
+            print(f"    Top features: {list(train_features.columns[:10])}")
+            
+            # Save features
+            output_dir.mkdir(exist_ok=True)
+            with open(output_dir / 'features.pkl', 'wb') as f:
+                pickle.dump(features, f)
+            
+            return features
+        except Exception as e:
+            print(f"  ⚠️  Error in feature engineering: {e}")
+            print(f"  Falling back to basic features...")
+            
+            # Fallback: return empty features (graphs will still work)
+            print("  Using basic graph features only...")
+            features = {
+                'train': None,
+                'val': None,
+                'test': None
+            }
+            
+            # Save empty features
+            output_dir.mkdir(exist_ok=True)
+            with open(output_dir / 'features.pkl', 'wb') as f:
+                pickle.dump(features, f)
+            
+            return features
 
 
 def run_graph_construction():
@@ -473,10 +518,32 @@ def main():
         # Combine labels from all splits
         all_labels = pd.concat([train_labels, val_labels, test_labels], ignore_index=True)
         
-        # Prepare full data dictionary
+        # Prepare full data dictionary with MERGED node ID maps from all splits
+        # This ensures ALL diagnosis/procedure codes are in the vocabulary,
+        # allowing embeddings to transfer across CV folds
+        print("\n  Merging node ID maps from all splits for CV...")
+        
+        merged_node_id_maps = defaultdict(dict)
+        merged_reverse_node_maps = defaultdict(dict)
+        
+        # Merge node IDs from train, val, test
+        for split_name in ['train', 'val', 'test']:
+            if split_name not in graphs['node_id_maps']:
+                continue
+            for node_type in graphs['node_id_maps'][split_name]:
+                for node_id, node_idx in graphs['node_id_maps'][split_name][node_type].items():
+                    if node_id not in merged_node_id_maps[node_type]:
+                        new_idx = len(merged_node_id_maps[node_type])
+                        merged_node_id_maps[node_type][node_id] = new_idx
+                        merged_reverse_node_maps[node_type][new_idx] = node_id
+        
+        print(f"    Merged node types:")
+        for ntype in merged_node_id_maps:
+            print(f"      {ntype}: {len(merged_node_id_maps[ntype])} unique nodes")
+        
         full_data = {
-            'node_id_maps': graphs['node_id_maps']['train'],  # Use train maps as base
-            'reverse_node_maps': graphs['reverse_node_maps']['train'],
+            'node_id_maps': dict(merged_node_id_maps),
+            'reverse_node_maps': dict(merged_reverse_node_maps),
             'node_features': {}
         }
         
