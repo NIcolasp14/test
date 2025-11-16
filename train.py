@@ -191,19 +191,37 @@ def train_epoch(model, train_data, optimizer, device, epoch):
     total_bce = 0
     n_batches = 0
     
-    # For simplified version, we'll train on all patient embeddings at once
-    # In production, you'd use mini-batch sampling
+    # CRITICAL FIX: Only train on patients that have labels in labels_df
+    # Enriched labels create multiple samples per patient, but we need to ensure
+    # patient_nodes matches the labels we're using
     
-    patient_nodes = torch.tensor(
-        list(train_data['node_id_maps']['patient'].values()),
-        dtype=torch.long
-    ).to(device)
-    
-    node_features = train_data['node_features']['patient'].to(device)
-    
-    # Get labels
     labels_df = train_data['labels']
-    patient_ids = [train_data['reverse_node_maps']['patient'][i] for i in range(len(patient_nodes))]
+    
+    # Get unique patient IDs that have labels
+    patients_with_labels = labels_df['patient_id'].unique()
+    
+    # Filter patient nodes to only those with labels
+    node_id_map = train_data['node_id_maps']['patient']
+    reverse_node_map = train_data['reverse_node_maps']['patient']
+    
+    # Create patient_nodes only for patients with labels
+    patient_nodes_list = []
+    patient_ids = []
+    
+    for pid in patients_with_labels:
+        if pid in node_id_map:
+            patient_nodes_list.append(node_id_map[pid])
+            patient_ids.append(pid)
+    
+    patient_nodes = torch.tensor(patient_nodes_list, dtype=torch.long).to(device)
+    
+    # Get node features for these patients
+    node_features_full = train_data['node_features']['patient'].to(device)
+    # Index only the patients we're using
+    node_features = node_features_full[patient_nodes]
+    
+    # Reset patient_nodes to be 0-indexed for the current batch
+    patient_nodes_reindexed = torch.arange(len(patient_nodes), dtype=torch.long).to(device)
     
     # Match labels to patient nodes
     delta_targets = []
@@ -214,7 +232,7 @@ def train_epoch(model, train_data, optimizer, device, epoch):
     for pid in patient_ids:
         patient_labels = labels_df[labels_df['patient_id'] == pid]
         if len(patient_labels) > 0:
-            # Use first label for simplicity
+            # Use first label for simplicity (for patients with multiple observation points)
             label = patient_labels.iloc[0]
             delta_targets.append(max(0, label['days_to_next_ed']))
             # Use normalized target for training (better scale)
@@ -222,6 +240,7 @@ def train_epoch(model, train_data, optimizer, device, epoch):
             binary_targets.append(label['has_next_ed_30d'])
             censored_flags.append(label['days_to_next_ed'] < 0)
         else:
+            # This shouldn't happen now, but keep as fallback
             delta_targets.append(0.0)
             delta_targets_normalized.append(-1.0)
             binary_targets.append(0)
@@ -244,12 +263,12 @@ def train_epoch(model, train_data, optimizer, device, epoch):
     optimizer.zero_grad()
     
     if hasattr(model, 'get_embeddings') and hasattr(model, 'pred_head'):
-        # TGN-style model
-        embeddings = model.get_embeddings(patient_nodes, node_features)
+        # TGN-style model - use reindexed nodes
+        embeddings = model.get_embeddings(patient_nodes_reindexed, node_features)
         delta_pred, binary_logits = model.pred_head(embeddings)
     else:
-        # Direct forward
-        delta_pred, binary_logits = model(patient_nodes, node_features)
+        # Direct forward - use reindexed nodes
+        delta_pred, binary_logits = model(patient_nodes_reindexed, node_features)
     
     # Compute loss (use normalized targets for MAE)
     loss, mae_loss, bce_loss = compute_loss(
@@ -278,10 +297,10 @@ def train_epoch(model, train_data, optimizer, device, epoch):
         # DIAGNOSTIC: Show predictions vs true labels to check if model is learning correctly
         with torch.no_grad():
             if hasattr(model, 'get_embeddings') and hasattr(model, 'pred_head'):
-                embeddings = model.get_embeddings(patient_nodes, node_features)
+                embeddings = model.get_embeddings(patient_nodes_reindexed, node_features)
                 delta_pred_diag, binary_logits_diag = model.pred_head(embeddings)
             else:
-                delta_pred_diag, binary_logits_diag = model(patient_nodes, node_features)
+                delta_pred_diag, binary_logits_diag = model(patient_nodes_reindexed, node_features)
             
             binary_probs_diag = torch.sigmoid(binary_logits_diag).squeeze()
             pred_positive_rate = (binary_probs_diag > 0.5).float().mean().item()
@@ -309,18 +328,34 @@ def validate(model, val_data, device):
     """
     model.eval()
     
-    # Prepare data
-    patient_nodes = torch.tensor(
-        list(val_data['node_id_maps']['patient'].values()),
-        dtype=torch.long
-    ).to(device)
-    
-    node_features = val_data['node_features']['patient'].to(device)
-    
-    # Get labels
+    # CRITICAL FIX: Only validate on patients that have labels
     labels_df = val_data['labels']
-    patient_ids = [val_data['reverse_node_maps']['patient'][i] for i in range(len(patient_nodes))]
     
+    # Get unique patient IDs that have labels
+    patients_with_labels = labels_df['patient_id'].unique()
+    
+    # Filter patient nodes to only those with labels
+    node_id_map = val_data['node_id_maps']['patient']
+    
+    # Create patient_nodes only for patients with labels
+    patient_nodes_list = []
+    patient_ids = []
+    
+    for pid in patients_with_labels:
+        if pid in node_id_map:
+            patient_nodes_list.append(node_id_map[pid])
+            patient_ids.append(pid)
+    
+    patient_nodes = torch.tensor(patient_nodes_list, dtype=torch.long).to(device)
+    
+    # Get node features for these patients
+    node_features_full = val_data['node_features']['patient'].to(device)
+    node_features = node_features_full[patient_nodes]
+    
+    # Reset patient_nodes to be 0-indexed
+    patient_nodes_reindexed = torch.arange(len(patient_nodes), dtype=torch.long).to(device)
+    
+    # Match labels
     delta_targets = []
     binary_targets = []
     censored_flags = []
@@ -342,9 +377,9 @@ def validate(model, val_data, device):
     binary_targets = torch.tensor(binary_targets, dtype=torch.float32)
     censored_mask = torch.tensor(censored_flags, dtype=torch.bool)
     
-    # Evaluate
+    # Evaluate - use reindexed patient nodes
     metrics = evaluate_model(
-        model, patient_nodes, node_features,
+        model, patient_nodes_reindexed, node_features,
         delta_targets, binary_targets, censored_mask, device
     )
     

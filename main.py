@@ -518,6 +518,14 @@ def main():
         # Combine labels from all splits
         all_labels = pd.concat([train_labels, val_labels, test_labels], ignore_index=True)
         
+        # DIAGNOSTIC: Show label distribution for CV
+        print(f"\n  📊 Combined Labels for Cross-Validation:")
+        print(f"    Total samples: {len(all_labels)}")
+        print(f"    Unique patients: {all_labels['patient_id'].nunique()}")
+        print(f"    Uncensored samples: {(all_labels['days_to_next_ed'] >= 0).sum()} ({100*(all_labels['days_to_next_ed'] >= 0).sum()/len(all_labels):.1f}%)")
+        print(f"    Positive samples (ED within 30d): {all_labels['has_next_ed_30d'].sum()} ({100*all_labels['has_next_ed_30d'].sum()/len(all_labels):.1f}%)")
+        print(f"    Censored: {(all_labels['days_to_next_ed'] < 0).sum()}")
+        
         # Prepare full data dictionary with MERGED node ID maps from all splits
         # This ensures ALL diagnosis/procedure codes are in the vocabulary,
         # allowing embeddings to transfer across CV folds

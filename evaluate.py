@@ -113,7 +113,7 @@ def evaluate_model(model, patient_nodes, node_features, true_deltas, true_binary
         model: Trained model
         patient_nodes: Patient node IDs
         node_features: Node features
-        true_deltas: True time-to-next-ED (in days)
+        true_deltas: True time-to-next-ED (in days, NOT normalized)
         true_binary_labels: True binary labels for 30-day ED
         censored_mask: Boolean mask for censored samples
         device: torch device
@@ -139,7 +139,10 @@ def evaluate_model(model, patient_nodes, node_features, true_deltas, true_binary
         else:
             raise ValueError("Unknown model type")
         
-        delta_pred = delta_pred.squeeze().cpu().numpy()
+        # Model outputs normalized [0, 1] predictions, denormalize to days
+        delta_pred_normalized = delta_pred.squeeze().cpu().numpy()
+        MAX_DAYS = float(config.MAX_DAYS_NORMALIZATION)
+        delta_pred = delta_pred_normalized * MAX_DAYS  # Denormalize to days
         binary_probs = torch.sigmoid(binary_logits).squeeze().cpu().numpy()
     
     # Convert targets
