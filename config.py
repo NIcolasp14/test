@@ -113,11 +113,18 @@ NUM_CLASSES = 3               # Low, Medium, High utilization
 # ED Utilization Classification Thresholds
 # Based on # of ED visits in lookback window
 UTILIZATION_LOOKBACK_DAYS = 365  # Look at past 12 months
+
+# Binning strategy
+USE_PERCENTILE_BINNING = True  # If True, use percentile-based binning (33/67 percentiles for balanced classes)
+                               # If False, use fixed thresholds below
+
+# Fixed thresholds (only used if USE_PERCENTILE_BINNING = False)
 UTILIZATION_THRESHOLDS = {
     'low': (0, 1),      # 0-1 visits = low utilizer
     'medium': (2, 4),   # 2-4 visits = medium utilizer
     'high': (5, 999)    # 5+ visits = high utilizer
 }
+
 # Class weights for imbalanced data (will be computed from data if None)
 CLASS_WEIGHTS = None  # Or manually set e.g. [1.0, 2.0, 5.0] to upweight rare classes
 

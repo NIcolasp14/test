@@ -122,9 +122,9 @@ def compute_diagnosis_features(data_dict):
         dx_features: DataFrame with patient-level diagnosis features
     """
     print("\n  Computing diagnosis features...")
-    
+        
     diagnosis = data_dict['diagnosis'].copy()
-    
+        
     if len(diagnosis) == 0:
         print("    Warning: No diagnoses found!")
         return pd.DataFrame()
@@ -176,9 +176,9 @@ def compute_procedure_features(data_dict):
         proc_features: DataFrame with patient-level procedure features
     """
     print("\n  Computing procedure features...")
-    
+        
     procedures = data_dict['procedures'].copy()
-    
+        
     if len(procedures) == 0:
         print("    Warning: No procedures found!")
         return pd.DataFrame()
@@ -229,14 +229,14 @@ def compute_temporal_features(data_dict):
     
     Returns:
         temporal_features: DataFrame with temporal features
-    """
+        """
     print("\n  Computing temporal features...")
-    
+        
     features = []
     
     # Use demographics for patient list
     demographics = data_dict['demographics']
-    
+        
     for _, patient in demographics.iterrows():
         patient_id = patient['sys_mbr_sk']
         

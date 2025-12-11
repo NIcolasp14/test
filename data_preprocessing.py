@@ -281,8 +281,8 @@ def create_timestamps(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     if diag_date_col:
         print(f"  Using '{diag_date_col}' for diagnosis timestamps")
         data['diagnosis']['timestamp'] = data['diagnosis'][diag_date_col].apply(parse_date)
-        data['diagnosis'] = data['diagnosis'][data['diagnosis']['timestamp'].notna()].copy()
-        print(f"  diagnosis: {len(data['diagnosis'])} with valid timestamps")
+    data['diagnosis'] = data['diagnosis'][data['diagnosis']['timestamp'].notna()].copy()
+    print(f"  diagnosis: {len(data['diagnosis'])} with valid timestamps")
     else:
         print(f"  Warning: No date column found in diagnosis. Creating dummy timestamps.")
         data['diagnosis']['timestamp'] = pd.Timestamp.now()
@@ -294,8 +294,8 @@ def create_timestamps(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     if proc_date_col:
         print(f"  Using '{proc_date_col}' for procedure timestamps")
         data['procedures']['timestamp'] = data['procedures'][proc_date_col].apply(parse_date)
-        data['procedures'] = data['procedures'][data['procedures']['timestamp'].notna()].copy()
-        print(f"  procedures: {len(data['procedures'])} with valid timestamps")
+    data['procedures'] = data['procedures'][data['procedures']['timestamp'].notna()].copy()
+    print(f"  procedures: {len(data['procedures'])} with valid timestamps")
     else:
         print(f"  Warning: No date column found in procedures. Creating dummy timestamps.")
         data['procedures']['timestamp'] = pd.Timestamp.now()
@@ -307,7 +307,7 @@ def create_timestamps(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     if ed_date_col:
         print(f"  Using '{ed_date_col}' for ED visit timestamps")
         data['nyu_edu']['timestamp'] = data['nyu_edu'][ed_date_col].apply(parse_date)
-        data['nyu_edu'] = data['nyu_edu'][data['nyu_edu']['timestamp'].notna()].copy()
+    data['nyu_edu'] = data['nyu_edu'][data['nyu_edu']['timestamp'].notna()].copy()
         
         # Filter out future dates (data quality issue)
         now = pd.Timestamp.now()
@@ -317,7 +317,7 @@ def create_timestamps(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
             print(f"    Future date range: {data['nyu_edu'][future_dates]['timestamp'].min()} to {data['nyu_edu'][future_dates]['timestamp'].max()}")
             data['nyu_edu'] = data['nyu_edu'][~future_dates].copy()
         
-        print(f"  nyu_edu: {len(data['nyu_edu'])} with valid timestamps")
+    print(f"  nyu_edu: {len(data['nyu_edu'])} with valid timestamps")
     else:
         print(f"  Warning: No date column found in nyu_edu. Creating dummy timestamps.")
         data['nyu_edu']['timestamp'] = pd.Timestamp.now()

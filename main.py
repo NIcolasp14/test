@@ -116,9 +116,22 @@ def run_preprocessing():
             # Create enriched labels with historical observation points
             # Create labels based on task type
             if config.TASK_TYPE == 'classification':
-                train_labels = create_utilization_labels(train_data, train_data['patient_ids'], 'train', observation_times='latest')
-                val_labels = create_utilization_labels(val_data, val_data['patient_ids'], 'val', observation_times='latest')
-                test_labels = create_utilization_labels(test_data, test_data['patient_ids'], 'test', observation_times='latest')
+                use_percentile = getattr(config, 'USE_PERCENTILE_BINNING', True)
+                # Compute thresholds on train set, then apply to val/test for consistency
+                train_labels, thresholds = create_utilization_labels(
+                    train_data, train_data['patient_ids'], 'train', 
+                    observation_times='latest', use_percentile_binning=use_percentile
+                )
+                val_labels, _ = create_utilization_labels(
+                    val_data, val_data['patient_ids'], 'val', 
+                    observation_times='latest', use_percentile_binning=use_percentile,
+                    predefined_thresholds=thresholds
+                )
+                test_labels, _ = create_utilization_labels(
+                    test_data, test_data['patient_ids'], 'test', 
+                    observation_times='latest', use_percentile_binning=use_percentile,
+                    predefined_thresholds=thresholds
+                )
             else:
                 # Survival/regression task
                 train_labels = create_enriched_labels_with_history(train_data, train_data['patient_ids'], 'train')

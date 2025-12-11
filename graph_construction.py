@@ -436,7 +436,7 @@ class HeteroGraphBuilder:
         for code in sorted(dx_codes):
             feat = None
             if has_code_embeddings:
-                feat = self.features['code_embeddings'].get(code)
+            feat = self.features['code_embeddings'].get(code)
                 if feat is None and config.UNK_TOKEN in self.features['code_embeddings']:
                     feat = self.features['code_embeddings'][config.UNK_TOKEN]
             
@@ -451,7 +451,7 @@ class HeteroGraphBuilder:
         for code in sorted(proc_codes):
             feat = None
             if has_code_embeddings:
-                feat = self.features['code_embeddings'].get(code)
+            feat = self.features['code_embeddings'].get(code)
                 if feat is None and config.UNK_TOKEN in self.features['code_embeddings']:
                     feat = self.features['code_embeddings'][config.UNK_TOKEN]
             
@@ -468,7 +468,7 @@ class HeteroGraphBuilder:
         for provider in sorted(providers):
             feat = None
             if has_provider_embeddings:
-                feat = self.features['provider_embeddings'].get(provider)
+            feat = self.features['provider_embeddings'].get(provider)
                 if feat is None and config.UNK_TOKEN in self.features['provider_embeddings']:
                     feat = self.features['provider_embeddings'][config.UNK_TOKEN]
             
@@ -485,7 +485,7 @@ class HeteroGraphBuilder:
         for hospital in sorted(hospitals):
             feat = None
             if has_hospital_embeddings:
-                feat = self.features['hospital_embeddings'].get(hospital)
+            feat = self.features['hospital_embeddings'].get(hospital)
                 if feat is None and config.UNK_TOKEN in self.features['hospital_embeddings']:
                     feat = self.features['hospital_embeddings'][config.UNK_TOKEN]
             
@@ -508,7 +508,7 @@ class HeteroGraphBuilder:
             node_features['visit'] = visit_features_tensor
         else:
             # Fallback if no visits
-            node_features['visit'] = torch.zeros((node_counts['visit'], config.PROJECTED_DIM))
+        node_features['visit'] = torch.zeros((node_counts['visit'], config.PROJECTED_DIM))
         
         # SDOH features (simple zero init for now)
         node_features['sdoh'] = torch.zeros((node_counts['sdoh'], config.PROJECTED_DIM))

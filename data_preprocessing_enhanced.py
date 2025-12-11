@@ -324,7 +324,9 @@ def create_patient_features(data: Dict[str, pd.DataFrame], patient_ids: List[int
 def create_utilization_labels(data: Dict[str, pd.DataFrame],
                              patient_ids: List[int],
                              split_name: str,
-                             observation_times: str = 'latest') -> pd.DataFrame:
+                             observation_times: str = 'latest',
+                             use_percentile_binning: bool = True,
+                             predefined_thresholds: tuple = None) -> tuple:
     """
     Create ED utilization classification labels (low/medium/high).
     
@@ -337,18 +339,24 @@ def create_utilization_labels(data: Dict[str, pd.DataFrame],
         observation_times: Strategy for observation times:
             - 'latest': Use latest event for each patient (simplest, 1 label per patient)
             - 'multiple': Create labels at multiple time points (more data)
+        use_percentile_binning: If True, compute thresholds from data distribution
+            for balanced classes (~33% each). If False, use config thresholds.
+        predefined_thresholds: Tuple of (low_medium_threshold, medium_high_threshold)
+            If provided, use these instead of computing new ones. This ensures
+            consistent binning across train/val/test splits.
     
     Returns:
-        DataFrame with columns:
+        Tuple of (labels_df, thresholds) where:
+        - labels_df: DataFrame with columns:
             - patient_id: Patient identifier
             - observation_time: Time at which features are observed
             - ed_count_lookback: # of ED visits in lookback window
             - utilization_class: 0 (low), 1 (medium), 2 (high)
             - class_name: 'low', 'medium', or 'high'
+        - thresholds: Tuple of (low_medium_threshold, medium_high_threshold)
     """
     print(f"\n  Creating utilization labels for {split_name} split...")
     print(f"    Lookback window: {config.UTILIZATION_LOOKBACK_DAYS} days")
-    print(f"    Thresholds: {config.UTILIZATION_THRESHOLDS}")
     
     # Check if timestamp exists
     if 'timestamp' not in data['nyu_edu'].columns:
@@ -361,8 +369,10 @@ def create_utilization_labels(data: Dict[str, pd.DataFrame],
     procedures = data['procedures'].sort_values(['sys_mbr_sk', 'timestamp']) if 'procedures' in data else pd.DataFrame()
     
     labels = []
+    ed_counts_all = []  # Collect all ED counts first for percentile-based binning
     lookback_delta = timedelta(days=config.UTILIZATION_LOOKBACK_DAYS)
     
+    # First pass: collect observation times and ED counts
     for patient_id in patient_ids:
         patient_ed = ed_visits[ed_visits['sys_mbr_sk'] == patient_id].copy()
         
@@ -390,10 +400,12 @@ def create_utilization_labels(data: Dict[str, pd.DataFrame],
         elif observation_times == 'multiple':
             # Create labels at multiple time points
             obs_times = []
+            latest_times = []
             
             # At each ED visit
             if len(patient_ed) > 0:
                 obs_times.extend(patient_ed['timestamp'].tolist())
+                latest_times.append(patient_ed['timestamp'].max())
             
             # At quarterly intervals if patient has long history
             if latest_times:
@@ -411,9 +423,8 @@ def create_utilization_labels(data: Dict[str, pd.DataFrame],
         else:
             raise ValueError(f"Unknown observation_times strategy: {observation_times}")
         
-        # Create labels at each observation time
+        # Count ED visits at each observation time
         for obs_time in obs_times:
-            # Count ED visits in lookback window
             lookback_start = obs_time - lookback_delta
             ed_in_window = patient_ed[
                 (patient_ed['timestamp'] >= lookback_start) &
@@ -421,26 +432,65 @@ def create_utilization_labels(data: Dict[str, pd.DataFrame],
             ]
             ed_count = len(ed_in_window)
             
-            # Classify utilization
-            if ed_count >= config.UTILIZATION_THRESHOLDS['high'][0]:
-                util_class = 2
-                class_name = 'high'
-            elif ed_count >= config.UTILIZATION_THRESHOLDS['medium'][0]:
-                util_class = 1
-                class_name = 'medium'
-            else:
-                util_class = 0
-                class_name = 'low'
-            
             labels.append({
                 'patient_id': patient_id,
                 'observation_time': obs_time,
                 'ed_count_lookback': ed_count,
-                'utilization_class': util_class,
-                'class_name': class_name
             })
+            ed_counts_all.append(ed_count)
     
     labels_df = pd.DataFrame(labels)
+    
+    if len(labels_df) == 0:
+        print(f"    ⚠️  Warning: No labels created for {split_name} split")
+        return labels_df, (0, 0)
+    
+    # Determine thresholds
+    if predefined_thresholds is not None:
+        # Use predefined thresholds (for val/test consistency with train)
+        threshold_low_medium, threshold_medium_high = predefined_thresholds
+        print(f"    Using PREDEFINED thresholds (from train set):")
+        print(f"      Low:    ED count <= {threshold_low_medium:.1f}")
+        print(f"      Medium: ED count <= {threshold_medium_high:.1f}")
+        print(f"      High:   ED count > {threshold_medium_high:.1f}")
+        
+        # Apply thresholds
+        labels_df['utilization_class'] = labels_df['ed_count_lookback'].apply(
+            lambda x: 0 if x <= threshold_low_medium else (1 if x <= threshold_medium_high else 2)
+        )
+    elif use_percentile_binning:
+        # Use percentile-based binning for balanced classes
+        # Split into tertiles (33rd and 67th percentiles)
+        threshold_low_medium = np.percentile(ed_counts_all, 33.3)
+        threshold_medium_high = np.percentile(ed_counts_all, 66.7)
+        
+        print(f"    Using PERCENTILE-BASED thresholds for balanced classes:")
+        print(f"      Low (0-33%):    ED count <= {threshold_low_medium:.1f}")
+        print(f"      Medium (33-67%): ED count <= {threshold_medium_high:.1f}")
+        print(f"      High (67-100%):  ED count > {threshold_medium_high:.1f}")
+        
+        # Apply thresholds
+        labels_df['utilization_class'] = labels_df['ed_count_lookback'].apply(
+            lambda x: 0 if x <= threshold_low_medium else (1 if x <= threshold_medium_high else 2)
+        )
+    else:
+        # Use fixed thresholds from config
+        print(f"    Using FIXED thresholds: {config.UTILIZATION_THRESHOLDS}")
+        threshold_low_medium = config.UTILIZATION_THRESHOLDS['medium'][0] - 1
+        threshold_medium_high = config.UTILIZATION_THRESHOLDS['high'][0] - 1
+        
+        def classify_ed_count(ed_count):
+            if ed_count >= config.UTILIZATION_THRESHOLDS['high'][0]:
+                return 2
+            elif ed_count >= config.UTILIZATION_THRESHOLDS['medium'][0]:
+                return 1
+            else:
+                return 0
+        
+        labels_df['utilization_class'] = labels_df['ed_count_lookback'].apply(classify_ed_count)
+    
+    # Add class name
+    labels_df['class_name'] = labels_df['utilization_class'].map({0: 'low', 1: 'medium', 2: 'high'})
     
     # Report class distribution
     if len(labels_df) > 0:
@@ -453,7 +503,7 @@ def create_utilization_labels(data: Dict[str, pd.DataFrame],
             pct = 100 * count / total if total > 0 else 0
             print(f"      {class_name.capitalize():>6}: {count:>5} ({pct:>5.1f}%)")
     
-    return labels_df
+    return labels_df, (threshold_low_medium, threshold_medium_high)
 
 
 def create_enriched_labels_with_history(data: Dict[str, pd.DataFrame], 
