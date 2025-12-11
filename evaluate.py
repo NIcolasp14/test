@@ -104,6 +104,89 @@ def compute_auroc_at_threshold(predictions, targets, threshold_days):
     return auroc
 
 
+def evaluate_model_classification(predictions, true_labels, logits):
+    """
+    Compute classification metrics
+    
+    Args:
+        predictions: Predicted class labels (numpy array)
+        true_labels: True class labels (numpy array)
+        logits: Raw model outputs (numpy array, shape [n_samples, n_classes])
+    
+    Returns:
+        Dictionary of metrics
+    """
+    from sklearn.metrics import (
+        accuracy_score, balanced_accuracy_score,
+        f1_score, precision_score, recall_score,
+        roc_auc_score, confusion_matrix, classification_report
+    )
+    from scipy.special import softmax
+    
+    if len(predictions) == 0 or len(true_labels) == 0:
+        return {
+            'accuracy': 0.0,
+            'balanced_accuracy': 0.0,
+            'f1_macro': 0.0,
+            'f1_weighted': 0.0,
+            'precision_macro': 0.0,
+            'recall_macro': 0.0,
+            'auroc_ovr': 0.0,
+            'auroc_ovo': 0.0
+        }
+    
+    # Basic metrics
+    accuracy = accuracy_score(true_labels, predictions)
+    balanced_acc = balanced_accuracy_score(true_labels, predictions)
+    
+    # F1, Precision, Recall (macro and weighted)
+    f1_macro = f1_score(true_labels, predictions, average='macro', zero_division=0)
+    f1_weighted = f1_score(true_labels, predictions, average='weighted', zero_division=0)
+    precision_macro = precision_score(true_labels, predictions, average='macro', zero_division=0)
+    recall_macro = recall_score(true_labels, predictions, average='macro', zero_division=0)
+    
+    # AUROC (requires probabilities)
+    probs = softmax(logits, axis=1)
+    
+    try:
+        # One-vs-Rest AUROC
+        auroc_ovr = roc_auc_score(true_labels, probs, multi_class='ovr', average='macro')
+    except ValueError:
+        auroc_ovr = 0.0
+    
+    try:
+        # One-vs-One AUROC
+        auroc_ovo = roc_auc_score(true_labels, probs, multi_class='ovo', average='macro')
+    except ValueError:
+        auroc_ovo = 0.0
+    
+    # Confusion matrix
+    cm = confusion_matrix(true_labels, predictions)
+    
+    metrics = {
+        'accuracy': accuracy,
+        'balanced_accuracy': balanced_acc,
+        'f1_macro': f1_macro,
+        'f1_weighted': f1_weighted,
+        'precision_macro': precision_macro,
+        'recall_macro': recall_macro,
+        'auroc_ovr': auroc_ovr,
+        'auroc_ovo': auroc_ovo,
+        'confusion_matrix': cm
+    }
+    
+    # Per-class metrics
+    report = classification_report(true_labels, predictions, output_dict=True, zero_division=0)
+    for class_idx in range(config.NUM_CLASSES):
+        class_name = ['low', 'medium', 'high'][class_idx]
+        if str(class_idx) in report:
+            metrics[f'f1_{class_name}'] = report[str(class_idx)]['f1-score']
+            metrics[f'precision_{class_name}'] = report[str(class_idx)]['precision']
+            metrics[f'recall_{class_name}'] = report[str(class_idx)]['recall']
+    
+    return metrics
+
+
 def evaluate_model(model, patient_nodes, node_features, true_deltas, true_binary_labels,
                    censored_mask=None, device=config.DEVICE):
     """

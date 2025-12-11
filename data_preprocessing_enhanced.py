@@ -321,6 +321,141 @@ def create_patient_features(data: Dict[str, pd.DataFrame], patient_ids: List[int
     return features_df
 
 
+def create_utilization_labels(data: Dict[str, pd.DataFrame],
+                             patient_ids: List[int],
+                             split_name: str,
+                             observation_times: str = 'latest') -> pd.DataFrame:
+    """
+    Create ED utilization classification labels (low/medium/high).
+    
+    For each patient, classify based on # of ED visits in lookback window.
+    
+    Args:
+        data: Dict of dataframes
+        patient_ids: List of patient IDs for this split
+        split_name: Name of split (for logging)
+        observation_times: Strategy for observation times:
+            - 'latest': Use latest event for each patient (simplest, 1 label per patient)
+            - 'multiple': Create labels at multiple time points (more data)
+    
+    Returns:
+        DataFrame with columns:
+            - patient_id: Patient identifier
+            - observation_time: Time at which features are observed
+            - ed_count_lookback: # of ED visits in lookback window
+            - utilization_class: 0 (low), 1 (medium), 2 (high)
+            - class_name: 'low', 'medium', or 'high'
+    """
+    print(f"\n  Creating utilization labels for {split_name} split...")
+    print(f"    Lookback window: {config.UTILIZATION_LOOKBACK_DAYS} days")
+    print(f"    Thresholds: {config.UTILIZATION_THRESHOLDS}")
+    
+    # Check if timestamp exists
+    if 'timestamp' not in data['nyu_edu'].columns:
+        print(f"  ⚠️  Data doesn't have 'timestamp' column yet - creating timestamps first")
+        from data_preprocessing import create_timestamps
+        create_timestamps(data)
+    
+    ed_visits = data['nyu_edu'].sort_values(['sys_mbr_sk', 'timestamp'])
+    diagnosis = data['diagnosis'].sort_values(['clm_sys_mbr_sk', 'timestamp']) if 'diagnosis' in data else pd.DataFrame()
+    procedures = data['procedures'].sort_values(['sys_mbr_sk', 'timestamp']) if 'procedures' in data else pd.DataFrame()
+    
+    labels = []
+    lookback_delta = timedelta(days=config.UTILIZATION_LOOKBACK_DAYS)
+    
+    for patient_id in patient_ids:
+        patient_ed = ed_visits[ed_visits['sys_mbr_sk'] == patient_id].copy()
+        
+        # Determine observation time(s)
+        if observation_times == 'latest':
+            # Use latest event time for this patient
+            latest_times = []
+            if len(patient_ed) > 0:
+                latest_times.append(patient_ed['timestamp'].max())
+            if len(diagnosis) > 0:
+                patient_dx = diagnosis[diagnosis['clm_sys_mbr_sk'] == patient_id]
+                if len(patient_dx) > 0:
+                    latest_times.append(patient_dx['timestamp'].max())
+            if len(procedures) > 0:
+                patient_proc = procedures[procedures['sys_mbr_sk'] == patient_id]
+                if len(patient_proc) > 0:
+                    latest_times.append(patient_proc['timestamp'].max())
+            
+            if not latest_times:
+                continue  # Skip patient with no events
+            
+            obs_time = max(latest_times)
+            obs_times = [obs_time]
+        
+        elif observation_times == 'multiple':
+            # Create labels at multiple time points
+            obs_times = []
+            
+            # At each ED visit
+            if len(patient_ed) > 0:
+                obs_times.extend(patient_ed['timestamp'].tolist())
+            
+            # At quarterly intervals if patient has long history
+            if latest_times:
+                min_time = min(latest_times)
+                max_time = max(latest_times)
+                days_span = (max_time - min_time).days
+                if days_span > 90:
+                    # Add quarterly snapshots
+                    for i in range(0, days_span, 90):
+                        snapshot_time = min_time + timedelta(days=i)
+                        if snapshot_time not in obs_times:
+                            obs_times.append(snapshot_time)
+            
+            obs_times = sorted(set(obs_times))
+        else:
+            raise ValueError(f"Unknown observation_times strategy: {observation_times}")
+        
+        # Create labels at each observation time
+        for obs_time in obs_times:
+            # Count ED visits in lookback window
+            lookback_start = obs_time - lookback_delta
+            ed_in_window = patient_ed[
+                (patient_ed['timestamp'] >= lookback_start) &
+                (patient_ed['timestamp'] < obs_time)
+            ]
+            ed_count = len(ed_in_window)
+            
+            # Classify utilization
+            if ed_count >= config.UTILIZATION_THRESHOLDS['high'][0]:
+                util_class = 2
+                class_name = 'high'
+            elif ed_count >= config.UTILIZATION_THRESHOLDS['medium'][0]:
+                util_class = 1
+                class_name = 'medium'
+            else:
+                util_class = 0
+                class_name = 'low'
+            
+            labels.append({
+                'patient_id': patient_id,
+                'observation_time': obs_time,
+                'ed_count_lookback': ed_count,
+                'utilization_class': util_class,
+                'class_name': class_name
+            })
+    
+    labels_df = pd.DataFrame(labels)
+    
+    # Report class distribution
+    if len(labels_df) > 0:
+        class_counts = labels_df['class_name'].value_counts()
+        total = len(labels_df)
+        print(f"\n    {split_name} Utilization Distribution:")
+        print(f"      Total samples: {total}")
+        for class_name in ['low', 'medium', 'high']:
+            count = class_counts.get(class_name, 0)
+            pct = 100 * count / total if total > 0 else 0
+            print(f"      {class_name.capitalize():>6}: {count:>5} ({pct:>5.1f}%)")
+    
+    return labels_df
+
+
 def create_enriched_labels_with_history(data: Dict[str, pd.DataFrame], 
                                         patient_ids: List[int],
                                         split_name: str) -> pd.DataFrame:

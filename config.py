@@ -104,10 +104,27 @@ DEEPSURV_LAYERS = [128, 64, 32]  # Hidden layer sizes
 DEEPSURV_DROPOUT = 0.3
 DEEPSURV_BATCH_NORM = True
 
-# Prediction head
-USE_MULTI_TASK = True     # Both time-to-event and binary classification
-BINARY_THRESHOLD_DAYS = 30  # Predict if ED visit within N days
-MAX_DAYS_NORMALIZATION = 365  # Cap and normalize time-to-event predictions to this range
+# ============================================================================
+# TASK CONFIGURATION
+# ============================================================================
+TASK_TYPE = "classification"  # Options: "classification", "survival", "regression"
+NUM_CLASSES = 3               # Low, Medium, High utilization
+
+# ED Utilization Classification Thresholds
+# Based on # of ED visits in lookback window
+UTILIZATION_LOOKBACK_DAYS = 365  # Look at past 12 months
+UTILIZATION_THRESHOLDS = {
+    'low': (0, 1),      # 0-1 visits = low utilizer
+    'medium': (2, 4),   # 2-4 visits = medium utilizer
+    'high': (5, 999)    # 5+ visits = high utilizer
+}
+# Class weights for imbalanced data (will be computed from data if None)
+CLASS_WEIGHTS = None  # Or manually set e.g. [1.0, 2.0, 5.0] to upweight rare classes
+
+# Legacy parameters (kept for backward compatibility, not used in classification)
+USE_MULTI_TASK = False    # Not used in classification mode
+BINARY_THRESHOLD_DAYS = 30
+MAX_DAYS_NORMALIZATION = 365
 
 # ============================================================================
 # TRAINING
@@ -118,14 +135,15 @@ LEARNING_RATE = 3e-4  # Decreased from 1e-3 for stability
 WEIGHT_DECAY = 5e-3  # Increased from 1e-4 for regularization
 GRAD_CLIP = 1.0
 
-# Loss weights (HEAVILY adjusted for class imbalance - BINARY CLASSIFICATION IS PRIMARY TASK)
-LAMBDA_BCE = 10.0         # Weight for binary classification loss (MASSIVELY INCREASED - this is what matters!)
-LAMBDA_MAE = 0.01         # Weight for MAE loss (MINIMIZED - regression unreliable with sparse labels)
+# Loss configuration for classification
+USE_FOCAL_LOSS = True     # Use focal loss for class imbalance
+FOCAL_ALPHA = None        # Per-class weights (computed from data if None)
+FOCAL_GAMMA = 2.0         # Focusing parameter for focal loss
+LABEL_SMOOTHING = 0.1     # Label smoothing for regularization
 
-# Focal Loss for extreme class imbalance (CRITICAL for <5% positive rate)
-USE_FOCAL_LOSS = True     # Use focal loss instead of weighted BCE  
-FOCAL_ALPHA = 0.1         # Weight for positive class (lowered to 0.1 for very rare class ~2-5%)
-FOCAL_GAMMA = 3.0         # Focusing parameter (INCREASED to 3.0 for harder focusing on mistakes)
+# Legacy loss weights (not used in classification)
+LAMBDA_BCE = 1.0
+LAMBDA_MAE = 0.0
 
 # Optimizer
 OPTIMIZER = "adamw"       # Options: "adam", "adamw", "sgd"
@@ -155,19 +173,20 @@ NEG_SAMPLE_RATIO = 0.0    # 0 = no negative sampling (we're doing regression)
 # EVALUATION
 # ============================================================================
 EVAL_BATCH_SIZE = 64
-EVAL_TIME_WINDOWS = [7, 30, 90]  # Days for AUROC evaluation
 
-# Metrics to track
+# Metrics to track for classification
 TRACK_METRICS = [
-    'c_index',        # Concordance index (Harrell)
-    'mae',            # Mean absolute error on time-to-event
-    'rmse',           # Root mean squared error
-    'auroc_7d',       # AUROC for 7-day window
-    'auroc_30d',      # AUROC for 30-day window
-    'auroc_90d',      # AUROC for 90-day window
+    'accuracy',           # Overall accuracy
+    'balanced_accuracy',  # Balanced accuracy (accounts for class imbalance)
+    'f1_macro',          # Macro-averaged F1 (equal weight per class)
+    'f1_weighted',       # Weighted F1 (weighted by support)
+    'precision_macro',   # Macro precision
+    'recall_macro',      # Macro recall
+    'auroc_ovr',         # One-vs-Rest AUROC
+    'auroc_ovo',         # One-vs-One AUROC
 ]
 
-PRIMARY_METRIC = 'auroc_30d'  # For early stopping and model selection (better for imbalanced data)
+PRIMARY_METRIC = 'f1_macro'  # For early stopping and model selection
 
 # Bootstrap confidence intervals
 BOOTSTRAP_SAMPLES = 1000
@@ -220,12 +239,12 @@ FORCE_REPROCESS = False   # Set to True to force reprocessing even if cache exis
 # ============================================================================
 # MODEL SELECTION
 # ============================================================================
-MODELS_TO_TRAIN = ['TGN', 'TGAT', 'LSTM', 'CoxPH', 'DeepSurv']  # Which models to train
-# Options: 
+MODELS_TO_TRAIN = ['TGN', 'TGAT', 'LSTM']  # Which models to train
+# Options for classification: 
 #   Graph models: 'TGN', 'TGAT', 'HGT'
-#   Time-series: 'LSTM', 'Transformer'
-#   Survival models: 'CoxPH', 'DeepSurv'
+#   Time-series: 'LSTM'
 #   Classical: 'LogisticRegression', 'RandomForest', 'XGBoost'
+# Note: CoxPH and DeepSurv are survival models, not used for classification
 
 # ============================================================================
 # SANITY CHECKS

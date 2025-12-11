@@ -20,26 +20,38 @@ except ImportError:
 
 class PredictionHead(nn.Module):
     """
-    Multi-task prediction head for ED utilization
-    - Regression: time to next ED visit (in days)
-    - Classification: binary within-30-day ED visit
+    Unified prediction head for ED utilization
+    - Classification mode: Predict low/medium/high utilization (3 classes)
+    - Survival mode: Predict time to next ED visit + binary classification
     """
     
-    def __init__(self, hidden_dim=config.HIDDEN_DIM):
+    def __init__(self, hidden_dim=config.HIDDEN_DIM, task_type=None):
         super().__init__()
-        self.delta_predictor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(config.DROPOUT),
-            nn.Linear(hidden_dim // 2, 1)
-        )
+        self.task_type = task_type or config.TASK_TYPE
         
-        self.binary_predictor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(config.DROPOUT),
-            nn.Linear(hidden_dim // 2, 1)
-        )
+        if self.task_type == 'classification':
+            # Multi-class classification head
+            self.classifier = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Dropout(config.DROPOUT),
+                nn.Linear(hidden_dim // 2, config.NUM_CLASSES)
+            )
+        else:
+            # Survival/regression heads
+            self.delta_predictor = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Dropout(config.DROPOUT),
+                nn.Linear(hidden_dim // 2, 1)
+            )
+            
+            self.binary_predictor = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Dropout(config.DROPOUT),
+                nn.Linear(hidden_dim // 2, 1)
+            )
     
     def forward(self, node_embeddings):
         """
@@ -47,14 +59,17 @@ class PredictionHead(nn.Module):
             node_embeddings: (batch_size, hidden_dim) - patient embeddings
         
         Returns:
-            delta_pred: (batch_size, 1) - predicted time normalized to [0, 1]
-            binary_logits: (batch_size, 1) - logits for within-30-day classification
+            For classification: logits (batch_size, num_classes)
+            For survival: (delta_pred, binary_logits) tuple
         """
-        # Predict normalized time-to-event in [0, 1] range using sigmoid
-        delta_pred = torch.sigmoid(self.delta_predictor(node_embeddings))
-        binary_logits = self.binary_predictor(node_embeddings)
-        
-        return delta_pred, binary_logits
+        if self.task_type == 'classification':
+            # Return class logits (no softmax, used in CrossEntropyLoss)
+            return self.classifier(node_embeddings)
+        else:
+            # Survival/regression mode
+            delta_pred = torch.sigmoid(self.delta_predictor(node_embeddings))
+            binary_logits = self.binary_predictor(node_embeddings)
+            return delta_pred, binary_logits
 
 
 # =============================================================================

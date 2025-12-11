@@ -19,7 +19,7 @@ from evaluate import evaluate_model, MetricsTracker, print_metrics
 
 def focal_loss(logits, targets, alpha=0.25, gamma=2.0):
     """
-    Focal Loss for extreme class imbalance
+    Focal Loss for binary classification with extreme class imbalance
     
     Args:
         logits: Raw model outputs (batch_size,)
@@ -45,6 +45,37 @@ def focal_loss(logits, targets, alpha=0.25, gamma=2.0):
     alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
     
     loss = alpha_t * focal_weight * bce_loss
+    
+    return loss.mean()
+
+
+def focal_loss_multiclass(logits, targets, alpha=None, gamma=2.0):
+    """
+    Focal Loss for multi-class classification with class imbalance
+    
+    Args:
+        logits: Raw model outputs (batch_size, num_classes)
+        targets: Class labels (batch_size,) with values in [0, num_classes-1]
+        alpha: Per-class weights (num_classes,) or None for equal weights
+        gamma: Focusing parameter (default 2.0)
+    
+    Returns:
+        Focal loss value
+    
+    Reference: https://arxiv.org/abs/1708.02002
+    """
+    # Compute cross-entropy loss (no reduction yet)
+    ce_loss = F.cross_entropy(logits, targets, weight=alpha, reduction='none')
+    
+    # Compute probabilities and pt
+    probs = F.softmax(logits, dim=1)
+    pt = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+    
+    # Focal term: (1 - pt)^gamma
+    focal_weight = (1 - pt) ** gamma
+    
+    # Apply focal weighting
+    loss = focal_weight * ce_loss
     
     return loss.mean()
 
@@ -106,9 +137,43 @@ def create_scheduler(optimizer, scheduler_type=config.SCHEDULER_TYPE):
         return None
 
 
+def compute_loss_classification(logits, targets, class_weights=None):
+    """
+    Compute loss for multi-class classification
+    
+    Args:
+        logits: Model outputs (batch_size, num_classes)
+        targets: Class labels (batch_size,) with values in [0, num_classes-1]
+        class_weights: Per-class weights for imbalance (num_classes,) or None
+    
+    Returns:
+        loss (scalar)
+    """
+    if config.USE_FOCAL_LOSS:
+        # Use focal loss for class imbalance
+        loss = focal_loss_multiclass(
+            logits,
+            targets,
+            alpha=class_weights,
+            gamma=config.FOCAL_GAMMA
+        )
+    else:
+        # Standard cross-entropy with optional label smoothing
+        loss = F.cross_entropy(
+            logits,
+            targets,
+            weight=class_weights,
+            label_smoothing=config.LABEL_SMOOTHING if hasattr(config, 'LABEL_SMOOTHING') else 0.0
+        )
+    
+    return loss
+
+
 def compute_loss(delta_pred, binary_logits, delta_true, binary_true, censored_mask=None, pos_weight=None, use_focal=True):
     """
-    Compute multi-task loss: MAE + Focal/Weighted BCE
+    Compute multi-task loss for survival/regression: MAE + Focal/Weighted BCE
+    
+    DEPRECATED: Use compute_loss_classification for classification tasks.
     
     Args:
         delta_pred: Predicted time-to-event (batch_size, 1) - normalized [0, 1]
@@ -169,6 +234,107 @@ def compute_loss(delta_pred, binary_logits, delta_true, binary_true, censored_ma
     total_loss = config.LAMBDA_MAE * mae_loss + config.LAMBDA_BCE * bce_loss
     
     return total_loss, mae_loss, bce_loss
+
+
+def train_epoch_classification(model, train_data, optimizer, device, epoch, class_weights=None):
+    """
+    Train for one epoch - CLASSIFICATION MODE
+    
+    Args:
+        model: Model to train
+        train_data: Dictionary with training data (must have 'labels' with 'utilization_class')
+        optimizer: Optimizer
+        device: torch device
+        epoch: Current epoch number
+        class_weights: Per-class weights for loss (optional)
+    
+    Returns:
+        avg_loss: Average training loss
+    """
+    model.train()
+    total_loss = 0
+    n_batches = 0
+    
+    labels_df = train_data['labels']
+    patients_with_labels = labels_df['patient_id'].unique()
+    
+    # Get node features
+    node_features_full = train_data['node_features']['patient'].to(device)
+    
+    # Map patient IDs to feature indices
+    reverse_node_map = train_data.get('reverse_node_maps', {}).get('patient', {})
+    pid_to_feat_idx = {pid: feat_idx for feat_idx, pid in reverse_node_map.items()}
+    
+    patient_nodes_list = []
+    patient_ids = []
+    
+    for pid in patients_with_labels:
+        if pid in pid_to_feat_idx:
+            feat_idx = pid_to_feat_idx[pid]
+            if feat_idx < len(node_features_full):
+                patient_nodes_list.append(feat_idx)
+                patient_ids.append(pid)
+    
+    if len(patient_nodes_list) == 0:
+        raise ValueError(f"No valid patient nodes found for training!")
+    
+    patient_nodes = torch.tensor(patient_nodes_list, dtype=torch.long).to(device)
+    node_features = node_features_full[patient_nodes]
+    patient_nodes_reindexed = torch.arange(len(patient_nodes), dtype=torch.long).to(device)
+    
+    # Get utilization class labels
+    class_targets = []
+    for pid in patient_ids:
+        patient_label = labels_df[labels_df['patient_id'] == pid].iloc[0]
+        class_targets.append(patient_label['utilization_class'])
+    
+    class_targets = torch.tensor(class_targets, dtype=torch.long).to(device)
+    
+    # Forward pass
+    optimizer.zero_grad()
+    
+    if hasattr(model, 'get_embeddings') and hasattr(model, 'pred_head'):
+        embeddings = model.get_embeddings(patient_nodes_reindexed, node_features)
+        logits = model.pred_head(embeddings)
+    else:
+        logits = model(patient_nodes_reindexed, node_features)
+    
+    # Compute classification loss
+    if class_weights is not None:
+        class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
+    else:
+        class_weights_tensor = None
+    
+    loss = compute_loss_classification(logits, class_targets, class_weights_tensor)
+    
+    # Backward pass
+    loss.backward()
+    
+    if config.GRAD_CLIP > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), config.GRAD_CLIP)
+    
+    optimizer.step()
+    
+    total_loss += loss.item()
+    n_batches += 1
+    
+    avg_loss = total_loss / n_batches if n_batches > 0 else 0
+    
+    # Diagnostics
+    if config.VERBOSE and epoch % config.LOG_INTERVAL == 0:
+        with torch.no_grad():
+            pred_classes = torch.argmax(logits, dim=1)
+            accuracy = (pred_classes == class_targets).float().mean().item()
+            
+            # Class distribution
+            for c in range(config.NUM_CLASSES):
+                pred_count = (pred_classes == c).sum().item()
+                true_count = (class_targets == c).sum().item()
+                print(f"    Class {c}: {pred_count} pred, {true_count} true")
+        
+        print(f"  Train Loss: {avg_loss:.4f}, Accuracy: {accuracy*100:.1f}%")
+    
+    return avg_loss
 
 
 def train_epoch(model, train_data, optimizer, device, epoch):
@@ -328,6 +494,75 @@ def train_epoch(model, train_data, optimizer, device, epoch):
     return avg_loss
 
 
+def validate_classification(model, val_data, device):
+    """
+    Validate model - CLASSIFICATION MODE
+    
+    Args:
+        model: Model to validate
+        val_data: Validation data dictionary
+        device: torch device
+    
+    Returns:
+        predictions: Array of predicted class labels
+        true_labels: Array of true class labels
+        logits: Array of raw logits for probability-based metrics
+    """
+    model.eval()
+    
+    labels_df = val_data['labels']
+    patients_with_labels = labels_df['patient_id'].unique()
+    
+    # Get node features
+    node_features_full = val_data['node_features']['patient'].to(device)
+    
+    # Map patient IDs to feature indices
+    reverse_node_map = val_data.get('reverse_node_maps', {}).get('patient', {})
+    pid_to_feat_idx = {pid: feat_idx for feat_idx, pid in reverse_node_map.items()}
+    
+    patient_nodes_list = []
+    patient_ids = []
+    
+    for pid in patients_with_labels:
+        if pid in pid_to_feat_idx:
+            feat_idx = pid_to_feat_idx[pid]
+            if feat_idx < len(node_features_full):
+                patient_nodes_list.append(feat_idx)
+                patient_ids.append(pid)
+    
+    if len(patient_nodes_list) == 0:
+        return np.array([]), np.array([]), np.array([])
+    
+    patient_nodes = torch.tensor(patient_nodes_list, dtype=torch.long).to(device)
+    node_features = node_features_full[patient_nodes]
+    patient_nodes_reindexed = torch.arange(len(patient_nodes), dtype=torch.long).to(device)
+    
+    # Get true labels
+    class_targets = []
+    for pid in patient_ids:
+        patient_label = labels_df[labels_df['patient_id'] == pid].iloc[0]
+        class_targets.append(patient_label['utilization_class'])
+    
+    class_targets = torch.tensor(class_targets, dtype=torch.long).to(device)
+    
+    # Forward pass
+    with torch.no_grad():
+        if hasattr(model, 'get_embeddings') and hasattr(model, 'pred_head'):
+            embeddings = model.get_embeddings(patient_nodes_reindexed, node_features)
+            logits = model.pred_head(embeddings)
+        else:
+            logits = model(patient_nodes_reindexed, node_features)
+        
+        predictions = torch.argmax(logits, dim=1)
+    
+    # Convert to numpy
+    predictions = predictions.cpu().numpy()
+    true_labels = class_targets.cpu().numpy()
+    logits = logits.cpu().numpy()
+    
+    return predictions, true_labels, logits
+
+
 def validate(model, val_data, device):
     """
     Validate model
@@ -435,25 +670,52 @@ def train_model(model, train_data, val_data, model_name, device=config.DEVICE):
     
     # CRITICAL DIAGNOSTIC: Check training data quality
     labels_df = train_data['labels']
-    uncensored = (labels_df['days_to_next_ed'] >= 0).sum()
-    positive_30d = labels_df['has_next_ed_30d'].sum()
     
     print(f"\n  📊 Training Data Quality Check:")
-    print(f"    Total patients: {len(labels_df)}")
-    print(f"    Uncensored samples (have next ED): {uncensored} ({100*uncensored/len(labels_df):.1f}%)")
-    print(f"    Positive samples (ED within 30d): {positive_30d} ({100*positive_30d/len(labels_df):.1f}%)")
+    print(f"    Total samples: {len(labels_df)}")
+    print(f"    Task type: {config.TASK_TYPE}")
     
-    if uncensored == 0:
-        print(f"\n    ⚠️  CRITICAL: NO UNCENSORED SAMPLES TO LEARN FROM!")
-        print(f"    ⚠️  MAE will be 0.0 and model will only learn from BCE loss")
-        print(f"    ⚠️  This indicates a data preprocessing issue.")
-    elif uncensored < 10:
-        print(f"\n    ⚠️  WARNING: Very few uncensored samples ({uncensored})")
-        print(f"    ⚠️  Training may be unstable")
-    
-    if positive_30d == 0:
-        print(f"\n    ⚠️  WARNING: No positive samples for 30-day prediction")
-        print(f"    ⚠️  BCE loss may not be meaningful")
+    # Check data based on task type
+    if config.TASK_TYPE == 'classification':
+        # Check class distribution
+        class_counts = labels_df['utilization_class'].value_counts().sort_index()
+        print(f"\n    Class Distribution:")
+        for class_idx in range(config.NUM_CLASSES):
+            class_name = ['low', 'medium', 'high'][class_idx]
+            count = class_counts.get(class_idx, 0)
+            pct = 100 * count / len(labels_df) if len(labels_df) > 0 else 0
+            print(f"      Class {class_idx} ({class_name}): {count} ({pct:.1f}%)")
+        
+        # Compute class weights for imbalanced data
+        if config.CLASS_WEIGHTS is None:
+            from sklearn.utils.class_weight import compute_class_weight
+            unique_classes = np.unique(labels_df['utilization_class'])
+            class_weights = compute_class_weight('balanced', classes=unique_classes, y=labels_df['utilization_class'])
+            class_weights = class_weights.tolist()
+            print(f"    Computed class weights: {class_weights}")
+        else:
+            class_weights = config.CLASS_WEIGHTS
+    else:
+        # Survival/regression mode
+        uncensored = (labels_df['days_to_next_ed'] >= 0).sum()
+        positive_30d = labels_df['has_next_ed_30d'].sum()
+        
+        print(f"    Uncensored samples (have next ED): {uncensored} ({100*uncensored/len(labels_df):.1f}%)")
+        print(f"    Positive samples (ED within 30d): {positive_30d} ({100*positive_30d/len(labels_df):.1f}%)")
+        
+        if uncensored == 0:
+            print(f"\n    ⚠️  CRITICAL: NO UNCENSORED SAMPLES TO LEARN FROM!")
+            print(f"    ⚠️  MAE will be 0.0 and model will only learn from BCE loss")
+            print(f"    ⚠️  This indicates a data preprocessing issue.")
+        elif uncensored < 10:
+            print(f"\n    ⚠️  WARNING: Very few uncensored samples ({uncensored})")
+            print(f"    ⚠️  Training may be unstable")
+        
+        if positive_30d == 0:
+            print(f"\n    ⚠️  WARNING: No positive samples for 30-day prediction")
+            print(f"    ⚠️  BCE loss may not be meaningful")
+        
+        class_weights = None  # Not used in survival mode
     
     model = model.to(device)
     
@@ -475,12 +737,22 @@ def train_model(model, train_data, val_data, model_name, device=config.DEVICE):
         if config.VERBOSE:
             print(f"\nEpoch {epoch}/{config.NUM_EPOCHS}")
         
-        # Train
-        train_loss = train_epoch(model, train_data, optimizer, device, epoch)
+        # Train - dispatch to appropriate function based on task type
+        if config.TASK_TYPE == 'classification':
+            train_loss = train_epoch_classification(model, train_data, optimizer, device, epoch, class_weights)
+        else:
+            train_loss = train_epoch(model, train_data, optimizer, device, epoch)
         
-        # Validate
+        # Validate - dispatch to appropriate function based on task type
         if epoch % config.SAVE_INTERVAL == 0:
-            val_metrics = validate(model, val_data, device)
+            if config.TASK_TYPE == 'classification':
+                # Get predictions and compute classification metrics
+                predictions, true_labels, logits = validate_classification(model, val_data, device)
+                from evaluate import evaluate_model_classification
+                val_metrics = evaluate_model_classification(predictions, true_labels, logits)
+            else:
+                val_metrics = validate(model, val_data, device)
+            
             metrics_tracker.update('val', val_metrics, epoch)
             
             if config.VERBOSE:

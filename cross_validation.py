@@ -12,8 +12,8 @@ import pickle
 import torch
 
 import config
-from train import train_model
-from evaluate import evaluate_model, print_metrics
+from train import train_model, train_epoch, train_epoch_classification, validate, validate_classification
+from evaluate import evaluate_model, evaluate_model_classification, print_metrics
 
 
 def create_stratified_folds(labels_df, n_folds=5, random_state=42):
@@ -190,70 +190,60 @@ def train_with_cross_validation(model_name, full_data, labels_df, graphs, n_fold
         # Evaluate on fold test set
         print(f"\n  Evaluating on fold {fold_idx + 1} test set...")
         
-        # Get test labels
-        test_labels_df = test_data['labels']
-        
-        # CRITICAL: Map patient IDs to their position in node_features, not to original graph node IDs
-        # Get unique patients that have labels
-        patients_with_labels = test_labels_df['patient_id'].unique()
-        
-        # Get node features
-        node_features_full = test_data['node_features']['patient'].to(device)
-        
-        # Create mapping from patient_id to index in node_features
-        reverse_node_map = test_data.get('reverse_node_maps', {}).get('patient', {})
-        
-        # Build patient_id -> feature_index mapping
-        pid_to_feat_idx = {}
-        for feat_idx, pid in reverse_node_map.items():
-            pid_to_feat_idx[pid] = feat_idx
-        
-        # Create patient_nodes and targets aligned by patient_id
-        patient_nodes_list = []
-        patient_ids_test = []
-        delta_targets = []
-        binary_targets = []
-        censored_flags = []
-        
-        for pid in patients_with_labels:
-            if pid in pid_to_feat_idx:
-                feat_idx = pid_to_feat_idx[pid]
-                # Validate index is in bounds
-                if feat_idx < len(node_features_full):
-                    patient_nodes_list.append(feat_idx)
-                    patient_ids_test.append(pid)
-                    
-                    # Get first label for this patient (for evaluation, use one per patient)
-                    patient_labels = test_labels_df[test_labels_df['patient_id'] == pid]
-                    if len(patient_labels) > 0:
-                        label = patient_labels.iloc[0]
-                        delta_targets.append(max(0, label['days_to_next_ed']))
-                        binary_targets.append(label['has_next_ed_30d'])
-                        censored_flags.append(label['days_to_next_ed'] < 0)
-                    else:
-                        delta_targets.append(0.0)
-                        binary_targets.append(0)
-                        censored_flags.append(True)
-        
-        if len(patient_nodes_list) == 0:
-            print(f"  ⚠️  Warning: No valid test patients found for fold {fold_idx + 1}")
-            continue
-        
-        patient_nodes = torch.tensor(patient_nodes_list, dtype=torch.long).to(device)
-        node_features = node_features_full[patient_nodes]
-        
-        # Reset to 0-indexed for model
-        patient_nodes_reindexed = torch.arange(len(patient_nodes), dtype=torch.long).to(device)
-        
-        delta_targets = torch.tensor(delta_targets, dtype=torch.float32)
-        binary_targets = torch.tensor(binary_targets, dtype=torch.float32)
-        censored_mask = torch.tensor(censored_flags, dtype=torch.bool)
-        
-        # Evaluate - use reindexed patient nodes
-        fold_test_metrics = evaluate_model(
-            model, patient_nodes_reindexed, node_features,
-            delta_targets, binary_targets, censored_mask, device
-        )
+        # Dispatch to appropriate evaluation based on task type
+        if config.TASK_TYPE == 'classification':
+            # Classification evaluation
+            predictions, true_labels, logits = validate_classification(model, test_data, device)
+            fold_test_metrics = evaluate_model_classification(predictions, true_labels, logits)
+        else:
+            # Survival/regression evaluation
+            test_labels_df = test_data['labels']
+            patients_with_labels = test_labels_df['patient_id'].unique()
+            node_features_full = test_data['node_features']['patient'].to(device)
+            reverse_node_map = test_data.get('reverse_node_maps', {}).get('patient', {})
+            pid_to_feat_idx = {feat_idx: pid for feat_idx, pid in reverse_node_map.items()}
+            pid_to_feat_idx = {pid: feat_idx for feat_idx, pid in reverse_node_map.items()}
+            
+            patient_nodes_list = []
+            patient_ids_test = []
+            delta_targets = []
+            binary_targets = []
+            censored_flags = []
+            
+            for pid in patients_with_labels:
+                if pid in pid_to_feat_idx:
+                    feat_idx = pid_to_feat_idx[pid]
+                    if feat_idx < len(node_features_full):
+                        patient_nodes_list.append(feat_idx)
+                        patient_ids_test.append(pid)
+                        
+                        patient_labels = test_labels_df[test_labels_df['patient_id'] == pid]
+                        if len(patient_labels) > 0:
+                            label = patient_labels.iloc[0]
+                            delta_targets.append(max(0, label['days_to_next_ed']))
+                            binary_targets.append(label['has_next_ed_30d'])
+                            censored_flags.append(label['days_to_next_ed'] < 0)
+                        else:
+                            delta_targets.append(0.0)
+                            binary_targets.append(0)
+                            censored_flags.append(True)
+            
+            if len(patient_nodes_list) == 0:
+                print(f"  ⚠️  Warning: No valid test patients found for fold {fold_idx + 1}")
+                continue
+            
+            patient_nodes = torch.tensor(patient_nodes_list, dtype=torch.long).to(device)
+            node_features = node_features_full[patient_nodes]
+            patient_nodes_reindexed = torch.arange(len(patient_nodes), dtype=torch.long).to(device)
+            
+            delta_targets = torch.tensor(delta_targets, dtype=torch.float32)
+            binary_targets = torch.tensor(binary_targets, dtype=torch.float32)
+            censored_mask = torch.tensor(censored_flags, dtype=torch.bool)
+            
+            fold_test_metrics = evaluate_model(
+                model, patient_nodes_reindexed, node_features,
+                delta_targets, binary_targets, censored_mask, device
+            )
         
         print(f"\n  Fold {fold_idx + 1} Test Metrics:")
         print_metrics(fold_test_metrics, prefix="    ")

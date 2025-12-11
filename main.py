@@ -20,6 +20,7 @@ from data_preprocessing import preprocess_pipeline
 from data_preprocessing_enhanced import (
     stratified_split_with_minimum_positives,
     create_enriched_labels_with_history,
+    create_utilization_labels,
     create_patient_features,
     create_patient_features_time_aware
 )
@@ -113,9 +114,16 @@ def run_preprocessing():
             )
             
             # Create enriched labels with historical observation points
-            train_labels = create_enriched_labels_with_history(train_data, train_data['patient_ids'], 'train')
-            val_labels = create_enriched_labels_with_history(val_data, val_data['patient_ids'], 'val')
-            test_labels = create_enriched_labels_with_history(test_data, test_data['patient_ids'], 'test')
+            # Create labels based on task type
+            if config.TASK_TYPE == 'classification':
+                train_labels = create_utilization_labels(train_data, train_data['patient_ids'], 'train', observation_times='latest')
+                val_labels = create_utilization_labels(val_data, val_data['patient_ids'], 'val', observation_times='latest')
+                test_labels = create_utilization_labels(test_data, test_data['patient_ids'], 'test', observation_times='latest')
+            else:
+                # Survival/regression task
+                train_labels = create_enriched_labels_with_history(train_data, train_data['patient_ids'], 'train')
+                val_labels = create_enriched_labels_with_history(val_data, val_data['patient_ids'], 'val')
+                test_labels = create_enriched_labels_with_history(test_data, test_data['patient_ids'], 'test')
             
             # Save processed data
             output_dir.mkdir(exist_ok=True)
