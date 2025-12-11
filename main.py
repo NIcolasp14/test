@@ -74,20 +74,44 @@ def run_preprocessing():
         print(f"    Val:   {len(val_data['nyu_edu'])} ED visits, {len(val_labels)} samples")
         print(f"    Test:  {len(test_data['nyu_edu'])} ED visits, {len(test_labels)} samples")
         
-        # Check for data quality issues
-        train_positives = train_labels['has_next_ed_30d'].sum()
-        val_positives = val_labels['has_next_ed_30d'].sum()
-        
-        print(f"\n    Label distribution:")
-        print(f"    Train: {train_positives}/{len(train_labels)} positive samples ({100*train_positives/len(train_labels):.1f}%)")
-        print(f"    Val:   {val_positives}/{len(val_labels)} positive samples ({100*val_positives/len(val_labels):.1f}%)")
-        
-        if train_positives < 100:
-            print("\n    ⚠️⚠️⚠️  CRITICAL WARNING: VERY FEW POSITIVE TRAINING SAMPLES!")
-            print(f"    ⚠️  Only {train_positives} ED-within-30d samples found!")
-            print("    ⚠️  Model likely to collapse to 'always negative' solution.")
-            print("\n    💡 SOLUTION: Set FORCE_REPROCESS = True in config.py")
-            print("       This will use enhanced preprocessing with balanced splits.")
+        # Check for data quality issues - task-aware
+        if config.TASK_TYPE == 'classification':
+            # Check if cached labels have classification columns
+            if 'utilization_class' not in train_labels.columns:
+                print("\n    ⚠️⚠️⚠️  CRITICAL WARNING: Cached data is for survival task, not classification!")
+                print("    ⚠️  The cache contains 'has_next_ed_30d' but current TASK_TYPE is 'classification'")
+                print("\n    💡 SOLUTION: Set FORCE_REPROCESS = True in config.py to regenerate with classification labels")
+                print("       Or delete outputs/ folder and run again")
+                raise ValueError("Task type mismatch: cached data is for survival task, but TASK_TYPE='classification'")
+            
+            # Show class distribution
+            print(f"\n    Label distribution (classification):")
+            for class_idx, class_name in enumerate(['low', 'medium', 'high']):
+                train_count = (train_labels['utilization_class'] == class_idx).sum()
+                val_count = (val_labels['utilization_class'] == class_idx).sum()
+                print(f"    {class_name.capitalize()}: Train {train_count}/{len(train_labels)} ({100*train_count/len(train_labels):.1f}%), "
+                      f"Val {val_count}/{len(val_labels)} ({100*val_count/len(val_labels):.1f}%)")
+        else:
+            # Survival/regression task
+            if 'has_next_ed_30d' not in train_labels.columns:
+                print("\n    ⚠️⚠️⚠️  CRITICAL WARNING: Cached data is for classification task, not survival!")
+                print("    ⚠️  The cache contains 'utilization_class' but current TASK_TYPE is not 'classification'")
+                print("\n    💡 SOLUTION: Set FORCE_REPROCESS = True in config.py to regenerate with survival labels")
+                raise ValueError(f"Task type mismatch: cached data is for classification task, but TASK_TYPE='{config.TASK_TYPE}'")
+            
+            train_positives = train_labels['has_next_ed_30d'].sum()
+            val_positives = val_labels['has_next_ed_30d'].sum()
+            
+            print(f"\n    Label distribution:")
+            print(f"    Train: {train_positives}/{len(train_labels)} positive samples ({100*train_positives/len(train_labels):.1f}%)")
+            print(f"    Val:   {val_positives}/{len(val_labels)} positive samples ({100*val_positives/len(val_labels):.1f}%)")
+            
+            if train_positives < 100:
+                print("\n    ⚠️⚠️⚠️  CRITICAL WARNING: VERY FEW POSITIVE TRAINING SAMPLES!")
+                print(f"    ⚠️  Only {train_positives} ED-within-30d samples found!")
+                print("    ⚠️  Model likely to collapse to 'always negative' solution.")
+                print("\n    💡 SOLUTION: Set FORCE_REPROCESS = True in config.py")
+                print("       This will use enhanced preprocessing with balanced splits.")
         
         return train_data, val_data, test_data, train_labels, val_labels, test_labels
     else:
